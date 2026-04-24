@@ -36,23 +36,21 @@ import logging
 import uuid
 from datetime import datetime
 
-import numpy as np
-from sentence_transformers import SentenceTransformer
-
 from db.queries.raw_articles import get_unclustered_articles, set_cluster_ids
 
 _log = logging.getLogger(__name__)
 
-_model: SentenceTransformer | None = None
+_model = None  # loaded lazily on first call to avoid torch import at startup
 
 SIMILARITY_THRESHOLD = 0.85
 _MODEL_NAME = "all-MiniLM-L6-v2"
 
 
-def _get_model() -> SentenceTransformer:
+def _get_model():
     """Load the sentence-transformer model on first use."""
     global _model
     if _model is None:
+        from sentence_transformers import SentenceTransformer  # noqa: PLC0415
         _log.info("Loading sentence-transformer model '%s' …", _MODEL_NAME)
         _model = SentenceTransformer(_MODEL_NAME)
     return _model
@@ -106,9 +104,10 @@ async def cluster_articles(
         return 0
 
     # --- Encode titles --------------------------------------------------
+    import numpy as np  # noqa: PLC0415 — deferred to avoid torch at startup
     model  = _get_model()
     titles = [a["title"] or "" for a in articles]
-    embeddings: np.ndarray = model.encode(
+    embeddings = model.encode(
         titles,
         normalize_embeddings=True,   # unit-vectors → cosine = dot product
         show_progress_bar=False,
