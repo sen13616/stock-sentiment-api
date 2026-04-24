@@ -5,7 +5,7 @@ import os
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 _client: aioredis.Redis | None = None
 

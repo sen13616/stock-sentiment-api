@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db.connection import close_pool, get_pool, init_pool
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 AV_BASE = "https://www.alphavantage.co/query"
 LOOKBACK_DAYS = 730

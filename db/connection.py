@@ -5,7 +5,7 @@ import os
 import asyncpg
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 _pool: asyncpg.Pool | None = None
 

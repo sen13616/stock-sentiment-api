@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from db.queries.raw_articles import hash_exists, insert_article
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 _AV_KEY      = os.environ.get("ALPHA_VANTAGE_KEY", "")
 _FINNHUB_KEY = os.environ.get("FINNHUB_KEY", "")

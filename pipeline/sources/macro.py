@@ -34,7 +34,7 @@ from db.queries.raw_signals import (
     insert_signals,
 )
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 _AV_KEY      = os.environ.get("ALPHA_VANTAGE_KEY", "")
 _FINNHUB_KEY = os.environ.get("FINNHUB_KEY", "")

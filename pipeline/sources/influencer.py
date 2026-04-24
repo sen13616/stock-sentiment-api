@@ -35,7 +35,7 @@ from db.queries.raw_signals import insert_signals
 
 _log = logging.getLogger(__name__)
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 _FINNHUB_KEY = os.environ.get("FINNHUB_KEY", "")
 
