@@ -1,8 +1,8 @@
 """
-tests/integration/test_connections.py
+tests/integration_test_connections.py
 
 Integration tests for DB and Redis connectivity.
-Require local PostgreSQL and Redis to be running.
+Requires local PostgreSQL and Redis to be running.
 
 Run with:
     pytest -m integration
