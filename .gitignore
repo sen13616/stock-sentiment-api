@@ -5,4 +5,6 @@ __pycache__/
 tests/
 *.egg-info/
 .git/
-.envtools/exports/
+.tools/exports/
+tools/exports/
+exports/
