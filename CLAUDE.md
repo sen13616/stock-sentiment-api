@@ -27,6 +27,15 @@ Full spec is in README.md. Read it before doing anything.
 DATABASE_URL, REDIS_URL, ALPHA_VANTAGE_KEY, FINNHUB_KEY, 
 NEWSAPI_KEY, POLYGON_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
 
+## Market hours
+US equity markets are open weekdays 14:30–21:00 UTC (9:30 am–4:00 pm Eastern).
+The `market_eod_job` runs at 21:15 UTC on weekdays to capture end-of-day data
+and ensure a fresh market sub-index is in Redis before the overnight period.
+The staleness checker (`pipeline/confidence/staleness.py`) is market-hours-aware:
+it does not penalise scores for being computed outside market hours. A score
+produced at Friday 21:15 UTC remains fresh all weekend; the 90-minute threshold
+only applies while markets are actually open.
+
 ## Test command
 pytest tests/
 

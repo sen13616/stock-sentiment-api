@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from api.auth import authenticate
-from api.response.schemas import TickersResponse
+from api.response.schemas import TickerItem, TickersResponse
 from db.queries.universe import get_all_tickers
 
 router = APIRouter()
@@ -20,5 +20,6 @@ router = APIRouter()
 async def list_tickers(
     tier: str = Depends(authenticate),
 ) -> TickersResponse:
-    tickers = await get_all_tickers()
-    return TickersResponse(universe_size=len(tickers), tickers=tickers)
+    rows = await get_all_tickers()
+    items = [TickerItem(ticker=r["ticker"], name=r["company_name"]) for r in rows]
+    return TickersResponse(universe_size=len(items), tickers=items)

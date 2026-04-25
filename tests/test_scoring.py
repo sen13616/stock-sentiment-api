@@ -224,7 +224,9 @@ class TestComputeDivergence:
 class TestCheckStaleness:
 
     def _now(self):
-        return datetime(2026, 4, 24, 12, 0, 0, tzinfo=timezone.utc)
+        # Friday 16:00 UTC — firmly within US market hours (14:30–21:00)
+        # so the 90-minute intraday threshold is active for market staleness.
+        return datetime(2026, 4, 24, 16, 0, 0, tzinfo=timezone.utc)
 
     def test_all_fresh(self):
         now = self._now()

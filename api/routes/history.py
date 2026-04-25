@@ -54,20 +54,23 @@ async def get_sentiment_history(
 
     rows = await get_history(ticker, days=days, interval=interval)
 
-    entries = [
-        HistoryEntry(
-            timestamp   = row["timestamp"],
-            score       = int(round(row["composite_score"])),
-            label       = score_to_label(int(round(row["composite_score"]))),
-            confidence  = int(row["confidence_score"]),
-            sub_indices = HistorySubIndices(
-                market     = row.get("market_index"),
-                narrative  = row.get("narrative_index"),
-                influencer = row.get("influencer_index"),
-                macro      = row.get("macro_index"),
-            ),
+    entries = []
+    for row in rows:
+        layer_values = {
+            "market":     row.get("market_index"),
+            "narrative":  row.get("narrative_index"),
+            "influencer": row.get("influencer_index"),
+            "macro":      row.get("macro_index"),
+        }
+        entries.append(
+            HistoryEntry(
+                timestamp      = row["timestamp"],
+                score          = int(round(row["composite_score"])),
+                label          = score_to_label(int(round(row["composite_score"]))),
+                confidence     = int(row["confidence_score"]),
+                sub_indices    = HistorySubIndices(**layer_values),
+                missing_layers = [l for l, v in layer_values.items() if v is None],
+            )
         )
-        for row in rows
-    ]
 
     return HistoryResponse(ticker=ticker, history=entries)

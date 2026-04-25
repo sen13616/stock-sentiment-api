@@ -23,6 +23,16 @@ from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
+# Market hours
+# ---------------------------------------------------------------------------
+
+class MarketHours(BaseModel):
+    is_open:    bool
+    next_open:  datetime
+    last_close: datetime
+
+
+# ---------------------------------------------------------------------------
 # Sentiment — free tier
 # ---------------------------------------------------------------------------
 
@@ -33,6 +43,7 @@ class FreeTierResponse(BaseModel):
     confidence:        int
     timestamp:         datetime
     cache_age_seconds: int
+    market_hours:      MarketHours
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +78,7 @@ class ProTierResponse(BaseModel):
     label:             str
     confidence:        int
     sub_indices:       SubIndices
+    missing_layers:    list[str]         = []
     divergence:        Optional[str]     = None
     top_drivers:       list[Driver]      = []
     explanation:       str               = ""
@@ -74,6 +86,7 @@ class ProTierResponse(BaseModel):
     confidence_flags:  list[str]         = []
     timestamp:         datetime
     cache_age_seconds: int
+    market_hours:      MarketHours
 
 
 # ---------------------------------------------------------------------------
@@ -107,11 +120,12 @@ class HistorySubIndices(BaseModel):
 
 
 class HistoryEntry(BaseModel):
-    timestamp:   datetime
-    score:       int
-    label:       str
-    confidence:  int
-    sub_indices: HistorySubIndices
+    timestamp:      datetime
+    score:          int
+    label:          str
+    confidence:     int
+    sub_indices:    HistorySubIndices
+    missing_layers: list[str] = []
 
 
 class HistoryResponse(BaseModel):
@@ -123,9 +137,14 @@ class HistoryResponse(BaseModel):
 # Tickers endpoint
 # ---------------------------------------------------------------------------
 
+class TickerItem(BaseModel):
+    ticker: str
+    name:   Optional[str] = None
+
+
 class TickersResponse(BaseModel):
     universe_size: int
-    tickers:       list[str]
+    tickers:       list[TickerItem]
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +153,9 @@ class TickersResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     status:               str
+    market_is_open:       bool
     last_market_run:      Optional[datetime] = None
     last_narrative_run:   Optional[datetime] = None
     last_influencer_run:  Optional[datetime] = None
     last_macro_run:       Optional[datetime] = None
+    last_eod_run:         Optional[datetime] = None

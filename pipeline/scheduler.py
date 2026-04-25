@@ -102,6 +102,27 @@ async def market_job() -> None:
     _log.info("market_job: complete")
 
 
+async def market_eod_job() -> None:
+    """
+    End-of-day market job — weekdays at 21:15 UTC (15 min after close).
+
+    Captures a fresh end-of-day score so that Redis always holds a valid
+    market sub-index before the overnight / weekend period begins.  Without
+    this job, users hitting the API outside market hours would see a null
+    market layer for the entire overnight period.
+    """
+    _log.info("market_eod_job: starting")
+    tickers = await get_active_tickers()
+    _log.info("market_eod_job: %d tickers", len(tickers))
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        await _fetch_all_tickers(fetch_market_signals, tickers, client)
+
+    await _score_all(tickers, "market_eod_job")
+    await _record_run("market_eod")
+    _log.info("market_eod_job: complete — scored %d tickers", len(tickers))
+
+
 async def narrative_job() -> None:
     """
     Narrative layer job — every 30 minutes.
@@ -171,6 +192,16 @@ scheduler.add_job(
     max_instances=1,
     coalesce=True,
     misfire_grace_time=60,
+)
+
+scheduler.add_job(
+    market_eod_job,
+    trigger=CronTrigger(day_of_week="mon-fri", hour=21, minute=15),
+    id="market_eod",
+    name="Market EOD snapshot (21:15 UTC weekdays)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=300,
 )
 
 scheduler.add_job(

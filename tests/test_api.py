@@ -209,10 +209,16 @@ class TestSentimentUnknownTicker:
 
 class TestTickers:
 
+    _MOCK_ROWS = [
+        {"ticker": "AAPL", "company_name": "Apple Inc."},
+        {"ticker": "MSFT", "company_name": "Microsoft Corp."},
+        {"ticker": "NVDA", "company_name": "NVIDIA Corp."},
+    ]
+
     def test_returns_universe_size_and_tickers_list(self, free_client):
         with patch(
             "api.routes.tickers.get_all_tickers",
-            AsyncMock(return_value=["AAPL", "MSFT", "NVDA"]),
+            AsyncMock(return_value=self._MOCK_ROWS),
         ):
             r = free_client.get(
                 "/v1/tickers",
@@ -223,7 +229,23 @@ class TestTickers:
         assert "universe_size" in data
         assert "tickers" in data
         assert data["universe_size"] == 3
-        assert "AAPL" in data["tickers"]
+        tickers_list = [t["ticker"] for t in data["tickers"]]
+        assert "AAPL" in tickers_list
+
+    def test_tickers_include_name_field(self, free_client):
+        with patch(
+            "api.routes.tickers.get_all_tickers",
+            AsyncMock(return_value=self._MOCK_ROWS),
+        ):
+            r = free_client.get(
+                "/v1/tickers",
+                headers={"Authorization": "Bearer sk-sm-test"},
+            )
+        data = r.json()
+        first = data["tickers"][0]
+        assert "ticker" in first
+        assert "name" in first
+        assert first["name"] == "Apple Inc."
 
 
 # ===========================================================================

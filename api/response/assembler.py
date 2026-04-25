@@ -18,16 +18,18 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from db.queries.sentiment_history import get_latest
 from db.redis import get_redis
+from pipeline.confidence.staleness import is_market_hours
 
 from .labels import score_to_label
 from .schemas import (
     Driver,
     FreeTierResponse,
     Freshness,
+    MarketHours,
     NoDataResponse,
     ProTierResponse,
     SubIndices,
@@ -122,6 +124,37 @@ async def _load_from_db(ticker: str) -> dict | None:
         return None
 
 
+def _market_hours_info(now: datetime) -> MarketHours:
+    """
+    Compute market open/close context from the current UTC time.
+
+    next_open  — next weekday at 14:30 UTC.
+    last_close — most recent weekday at 21:00 UTC.
+    """
+    _OPEN_H, _OPEN_M   = 14, 30
+    _CLOSE_H, _CLOSE_M = 21,  0
+
+    # ---- last_close ----
+    close_today = now.replace(hour=_CLOSE_H, minute=_CLOSE_M, second=0, microsecond=0)
+    lc_candidate = now if now >= close_today else now - timedelta(days=1)
+    while lc_candidate.isoweekday() > 5:
+        lc_candidate -= timedelta(days=1)
+    last_close = lc_candidate.replace(hour=_CLOSE_H, minute=_CLOSE_M, second=0, microsecond=0)
+
+    # ---- next_open ----
+    open_today = now.replace(hour=_OPEN_H, minute=_OPEN_M, second=0, microsecond=0)
+    no_candidate = now if now < open_today else now + timedelta(days=1)
+    while no_candidate.isoweekday() > 5:
+        no_candidate += timedelta(days=1)
+    next_open = no_candidate.replace(hour=_OPEN_H, minute=_OPEN_M, second=0, microsecond=0)
+
+    return MarketHours(
+        is_open    = is_market_hours(now),
+        next_open  = next_open,
+        last_close = last_close,
+    )
+
+
 def _sub_val(state: dict, layer: str) -> float | None:
     si = (state.get("sub_indices") or {}).get(layer)
     if si is None:
@@ -136,13 +169,15 @@ def _build_free(state: dict) -> FreeTierResponse:
     conf  = state.get("confidence") or {}
     confidence = int(conf.get("score") if isinstance(conf, dict) else conf or 0)
     ts    = _parse_dt(state.get("timestamp"))
+    now   = _now_utc()
     return FreeTierResponse(
         ticker            = state["ticker"].upper(),
         score             = score,
         label             = score_to_label(score),
         confidence        = confidence,
-        timestamp         = ts or _now_utc(),
+        timestamp         = ts or now,
         cache_age_seconds = _cache_age(state.get("timestamp")),
+        market_hours      = _market_hours_info(now),
     )
 
 
@@ -152,6 +187,7 @@ def _build_pro(state: dict) -> ProTierResponse:
     confidence = int(conf.get("score") if isinstance(conf, dict) else conf or 0)
     flags = conf.get("flags", []) if isinstance(conf, dict) else []
     ts    = _parse_dt(state.get("timestamp"))
+    now   = _now_utc()
 
     freshness_raw = state.get("freshness") or {}
     freshness = Freshness(
@@ -174,24 +210,29 @@ def _build_pro(state: dict) -> ProTierResponse:
         if isinstance(d, dict)
     ]
 
+    layer_values = {
+        "market":     _sub_val(state, "market"),
+        "narrative":  _sub_val(state, "narrative"),
+        "influencer": _sub_val(state, "influencer"),
+        "macro":      _sub_val(state, "macro"),
+    }
+    missing_layers = [layer for layer, val in layer_values.items() if val is None]
+
     return ProTierResponse(
         ticker            = state["ticker"].upper(),
         score             = score,
         label             = score_to_label(score),
         confidence        = confidence,
-        sub_indices       = SubIndices(
-            market     = _sub_val(state, "market"),
-            narrative  = _sub_val(state, "narrative"),
-            influencer = _sub_val(state, "influencer"),
-            macro      = _sub_val(state, "macro"),
-        ),
+        sub_indices       = SubIndices(**layer_values),
+        missing_layers    = missing_layers,
         divergence        = state.get("divergence"),
         top_drivers       = drivers,
         explanation       = state.get("explanation") or "",
         freshness         = freshness,
         confidence_flags  = list(flags),
-        timestamp         = ts or _now_utc(),
+        timestamp         = ts or now,
         cache_age_seconds = _cache_age(state.get("timestamp")),
+        market_hours      = _market_hours_info(now),
     )
 
 

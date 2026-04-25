@@ -40,11 +40,17 @@ async def is_supported_ticker(ticker: str) -> bool:
     return row is not None
 
 
-async def get_all_tickers() -> list[str]:
-    """Return all tickers in the universe sorted alphabetically."""
+async def get_all_tickers() -> list[dict]:
+    """
+    Return all tickers in the universe sorted alphabetically.
+
+    Each dict has:
+        ticker       : str  — the ticker symbol
+        company_name : str | None — full company name (None if not yet seeded)
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT ticker FROM ticker_universe ORDER BY ticker"
+            "SELECT ticker, company_name FROM ticker_universe ORDER BY ticker"
         )
-    return [r["ticker"] for r in rows]
+    return [{"ticker": r["ticker"], "company_name": r["company_name"]} for r in rows]
