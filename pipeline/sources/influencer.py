@@ -23,6 +23,7 @@ All written with upload_type='live'.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import logging
 import xml.etree.ElementTree as ET
@@ -32,6 +33,11 @@ import httpx
 from dotenv import load_dotenv
 
 from db.queries.raw_signals import insert_signals
+from pipeline.rate_limits import (
+    EDGAR_SEM, EDGAR_DELAY,
+    FINNHUB_SEM, FINNHUB_DELAY,
+    guarded_get,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -52,6 +58,7 @@ _EDGAR_HEADERS = {
 
 # Lazy-loaded CIK map: ticker → CIK integer
 _cik_cache: dict[str, int] = {}
+_cik_lock = asyncio.Lock()
 
 _INSIDER_LOOKBACK_DAYS = 30
 
@@ -65,17 +72,27 @@ async def _load_cik_map(client: httpx.AsyncClient) -> None:
     global _cik_cache
     if _cik_cache:
         return
-    try:
-        resp = await client.get(_EDGAR_TICKERS, headers=_EDGAR_HEADERS)
-        resp.raise_for_status()
-        data = resp.json()
-        _cik_cache = {
-            v["ticker"].upper(): int(v["cik_str"])
-            for v in data.values()
-            if "ticker" in v and "cik_str" in v
-        }
-    except Exception as exc:
-        _log.warning("EDGAR CIK map load error: %s", exc)
+    async with _cik_lock:
+        # Double-check after acquiring lock — another coroutine may have loaded it
+        if _cik_cache:
+            return
+        resp = await guarded_get(
+            client, _EDGAR_TICKERS,
+            headers=_EDGAR_HEADERS,
+            sem=EDGAR_SEM, delay=EDGAR_DELAY, label="EDGAR CIK map",
+        )
+        if resp is None or resp.status_code != 200:
+            _log.warning("EDGAR CIK map unavailable (status=%s)", resp.status_code if resp else None)
+            return
+        try:
+            data = resp.json()
+            _cik_cache = {
+                v["ticker"].upper(): int(v["cik_str"])
+                for v in data.values()
+                if "ticker" in v and "cik_str" in v
+            }
+        except Exception as exc:
+            _log.warning("EDGAR CIK map parse error: %s", exc)
 
 
 async def _get_cik(ticker: str, client: httpx.AsyncClient) -> int | None:
@@ -97,15 +114,19 @@ async def _fetch_form4_transactions(
     rows: list[tuple] = []
 
     # Step 1: fetch submissions JSON
+    resp = await guarded_get(
+        client, _EDGAR_SUB.format(cik=cik),
+        headers=_EDGAR_HEADERS,
+        sem=EDGAR_SEM, delay=EDGAR_DELAY, label=f"EDGAR submissions {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
+        _log.warning("EDGAR submissions unavailable for %s (CIK %d)", ticker, cik)
+        return rows
+
     try:
-        resp = await client.get(
-            _EDGAR_SUB.format(cik=cik),
-            headers=_EDGAR_HEADERS,
-        )
-        resp.raise_for_status()
         submissions = resp.json()
     except Exception as exc:
-        _log.warning("EDGAR submissions error for %s (CIK %s): %s", ticker, cik, exc)
+        _log.warning("EDGAR submissions parse error for %s: %s", ticker, exc)
         return rows
 
     recent = submissions.get("filings", {}).get("recent", {})
@@ -136,13 +157,16 @@ async def _fetch_form4_transactions(
         )
 
         # Step 2: fetch and parse the Form 4 XML
-        try:
-            xml_resp = await client.get(doc_url, headers=_EDGAR_HEADERS)
-            xml_resp.raise_for_status()
-            xml_text = xml_resp.text
-        except Exception as exc:
-            _log.warning("EDGAR Form 4 XML fetch error (%s): %s", acc, exc)
+        xml_resp = await guarded_get(
+            client, doc_url,
+            headers=_EDGAR_HEADERS,
+            sem=EDGAR_SEM, delay=EDGAR_DELAY, label=f"EDGAR Form4 {acc}",
+        )
+        if xml_resp is None or xml_resp.status_code != 200:
+            _log.warning("EDGAR Form 4 unavailable (%s)", acc)
             continue
+
+        xml_text = xml_resp.text
 
         try:
             root = ET.fromstring(xml_text)
@@ -192,16 +216,19 @@ async def _insider_finnhub(ticker: str, client: httpx.AsyncClient) -> list[tuple
     from_date = (datetime.now(timezone.utc) - timedelta(days=_INSIDER_LOOKBACK_DAYS)).date()
     rows: list[tuple] = []
 
-    try:
-        resp = await client.get(
-            f"{_FINNHUB_BASE}/stock/insider-transactions",
-            params={"symbol": ticker, "from": str(from_date), "token": _FINNHUB_KEY},
-        )
-        resp.raise_for_status()
-        body = resp.json()
-    except Exception as exc:
+    resp = await guarded_get(
+        client, f"{_FINNHUB_BASE}/stock/insider-transactions",
+        params={"symbol": ticker, "from": str(from_date), "token": _FINNHUB_KEY},
+        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub insider-txn {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
         # 403 expected on Finnhub free tier
-        _log.debug("Finnhub insider-transactions unavailable for %s: %s", ticker, exc)
+        _log.debug("Finnhub insider-transactions unavailable for %s", ticker)
+        return rows
+
+    try:
+        body = resp.json()
+    except Exception:
         return rows
 
     for txn in body.get("data", []):
@@ -229,16 +256,19 @@ async def _analyst_recommendations(
     = (strongBuy + buy) / (strongBuy + buy + hold + sell + strongSell).
     Returns the most recent period's ratio (0–1), or None.
     """
-    try:
-        resp = await client.get(
-            f"{_FINNHUB_BASE}/stock/recommendation",
-            params={"symbol": ticker, "token": _FINNHUB_KEY},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
+    resp = await guarded_get(
+        client, f"{_FINNHUB_BASE}/stock/recommendation",
+        params={"symbol": ticker, "token": _FINNHUB_KEY},
+        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub recommendation {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
         # 403 expected on Finnhub free tier
-        _log.debug("Finnhub recommendation unavailable for %s: %s", ticker, exc)
+        _log.debug("Finnhub recommendation unavailable for %s", ticker)
+        return None
+
+    try:
+        data = resp.json()
+    except Exception:
         return None
 
     if not isinstance(data, list) or not data:
@@ -266,16 +296,19 @@ async def _analyst_target_price(
     """
     Finnhub /stock/price-target → analyst_target_price (targetMean).
     """
-    try:
-        resp = await client.get(
-            f"{_FINNHUB_BASE}/stock/price-target",
-            params={"symbol": ticker, "token": _FINNHUB_KEY},
-        )
-        resp.raise_for_status()
-        body = resp.json()
-    except Exception as exc:
+    resp = await guarded_get(
+        client, f"{_FINNHUB_BASE}/stock/price-target",
+        params={"symbol": ticker, "token": _FINNHUB_KEY},
+        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub price-target {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
         # 403 expected on Finnhub free tier
-        _log.debug("Finnhub price-target unavailable for %s: %s", ticker, exc)
+        _log.debug("Finnhub price-target unavailable for %s", ticker)
+        return None
+
+    try:
+        body = resp.json()
+    except Exception:
         return None
 
     try:

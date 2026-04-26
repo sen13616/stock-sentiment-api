@@ -23,6 +23,7 @@ All written with upload_type='live', source as noted.
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -33,6 +34,13 @@ from db.queries.raw_signals import (
     get_close_history,
     insert_signals,
 )
+from pipeline.rate_limits import (
+    AV_SEM, AV_DELAY,
+    FINNHUB_SEM, FINNHUB_DELAY,
+    guarded_get,
+)
+
+_log = logging.getLogger(__name__)
 
 load_dotenv(override=False)
 
@@ -64,35 +72,40 @@ SECTOR_ETFS: dict[str, str] = {
 
 async def _vix_finnhub(client: httpx.AsyncClient) -> float | None:
     """Finnhub /quote?symbol=^VIX → current VIX level."""
+    resp = await guarded_get(
+        client, f"{_FINNHUB_BASE}/quote",
+        params={"symbol": "^VIX", "token": _FINNHUB_KEY},
+        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label="Finnhub VIX",
+    )
+    if resp is None or resp.status_code != 200:
+        return None
     try:
-        resp = await client.get(
-            f"{_FINNHUB_BASE}/quote",
-            params={"symbol": "^VIX", "token": _FINNHUB_KEY},
-        )
-        resp.raise_for_status()
         body = resp.json()
         price = body.get("c")  # current price
         return float(price) if price else None
     except Exception as exc:
-        print(f"    [macro] Finnhub VIX error: {exc}")
+        _log.warning("Finnhub VIX parse error: %s", exc)
         return None
 
 
 async def _vix_av(client: httpx.AsyncClient) -> float | None:
     """Alpha Vantage GLOBAL_QUOTE?symbol=^VIX fallback."""
+    resp = await guarded_get(
+        client, _AV_BASE,
+        params={
+            "function": "GLOBAL_QUOTE",
+            "symbol":   "^VIX",
+            "apikey":   _AV_KEY,
+        },
+        sem=AV_SEM, delay=AV_DELAY, label="AV VIX",
+    )
+    if resp is None:
+        return None
+
     try:
-        resp = await client.get(
-            _AV_BASE,
-            params={
-                "function": "GLOBAL_QUOTE",
-                "symbol":   "^VIX",
-                "apikey":   _AV_KEY,
-            },
-        )
-        resp.raise_for_status()
         body = resp.json()
     except Exception as exc:
-        print(f"    [macro] AV VIX error: {exc}")
+        _log.warning("AV VIX JSON parse error: %s", exc)
         return None
 
     if "Note" in body or "Information" in body:
@@ -115,27 +128,30 @@ async def _vix_av(client: httpx.AsyncClient) -> float | None:
 
 async def _etf_close_av(etf: str, client: httpx.AsyncClient) -> tuple[float, datetime] | None:
     """Alpha Vantage GLOBAL_QUOTE for a sector ETF → (close, timestamp)."""
+    resp = await guarded_get(
+        client, _AV_BASE,
+        params={
+            "function": "GLOBAL_QUOTE",
+            "symbol":   etf,
+            "apikey":   _AV_KEY,
+        },
+        sem=AV_SEM, delay=AV_DELAY, label=f"AV ETF {etf}",
+    )
+    if resp is None:
+        return None
+
     try:
-        resp = await client.get(
-            _AV_BASE,
-            params={
-                "function": "GLOBAL_QUOTE",
-                "symbol":   etf,
-                "apikey":   _AV_KEY,
-            },
-        )
-        resp.raise_for_status()
         body = resp.json()
     except Exception as exc:
-        print(f"    [macro] AV ETF quote error for {etf}: {exc}")
+        _log.warning("AV ETF quote JSON parse error for %s: %s", etf, exc)
         return None
 
     if "Note" in body or "Information" in body:
         return None
 
     q = body.get("Global Quote", {})
-    price_str    = q.get("05. price")
-    date_str     = q.get("07. latest trading day", "")
+    price_str = q.get("05. price")
+    date_str  = q.get("07. latest trading day", "")
 
     if not price_str:
         return None
@@ -186,13 +202,13 @@ async def _run_macro(client: httpx.AsyncClient) -> None:
     if vix is not None:
         src = "finnhub" if vix is not None else "alpha_vantage"
         rows.append(("_MACRO_", "vix", vix, src, "live", now))
-        print(f"    [macro] VIX = {vix:.2f}")
+        _log.info("VIX = %.2f", vix)
 
     # --- Sector ETF closes and 20-day returns ---
     for sector, etf in SECTOR_ETFS.items():
         result = await _etf_close_av(etf, client)
         if result is None:
-            print(f"    [macro] No data for {etf} ({sector})")
+            _log.info("No data for %s (%s)", etf, sector)
             continue
 
         etf_close, etf_ts = result
@@ -202,9 +218,9 @@ async def _run_macro(client: httpx.AsyncClient) -> None:
         ret_20d = _compute_etf_return_20d(etf_close, close_history)
         if ret_20d is not None:
             rows.append((etf, "sector_etf_return_20d", ret_20d, "computed", "live", now))
-            print(f"    [macro] {etf}: close={etf_close:.2f}  20d_return={ret_20d:+.2%}")
+            _log.info("%s: close=%.2f  20d_return=%+.2%%", etf, etf_close, ret_20d)
         else:
-            print(f"    [macro] {etf}: close={etf_close:.2f}  (insufficient history for 20d return)")
+            _log.info("%s: close=%.2f  (insufficient history for 20d return)", etf, etf_close)
 
     await insert_signals(rows)
 

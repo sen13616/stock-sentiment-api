@@ -19,6 +19,7 @@ is left NULL and will be populated in Phase 2.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +27,13 @@ import httpx
 from dotenv import load_dotenv
 
 from db.queries.raw_articles import hash_exists, insert_article
+from pipeline.rate_limits import (
+    AV_SEM, AV_DELAY,
+    FINNHUB_SEM, FINNHUB_DELAY,
+    guarded_get,
+)
+
+_log = logging.getLogger(__name__)
 
 load_dotenv(override=False)
 
@@ -60,20 +68,23 @@ async def _fetch_av_news(ticker: str, client: httpx.AsyncClient) -> list[dict]:
     AV NEWS_SENTIMENT for ticker.
     Returns list of normalized article dicts.
     """
+    resp = await guarded_get(
+        client, _AV_BASE,
+        params={
+            "function": "NEWS_SENTIMENT",
+            "tickers":  ticker,
+            "limit":    50,
+            "apikey":   _AV_KEY,
+        },
+        sem=AV_SEM, delay=AV_DELAY, label=f"AV NEWS_SENTIMENT {ticker}",
+    )
+    if resp is None:
+        return []
+
     try:
-        resp = await client.get(
-            _AV_BASE,
-            params={
-                "function": "NEWS_SENTIMENT",
-                "tickers":  ticker,
-                "limit":    50,
-                "apikey":   _AV_KEY,
-            },
-        )
-        resp.raise_for_status()
         body = resp.json()
     except Exception as exc:
-        print(f"    [narrative] AV news error for {ticker}: {exc}")
+        _log.warning("AV NEWS_SENTIMENT JSON parse error for %s: %s", ticker, exc)
         return []
 
     if "Note" in body or "Information" in body:
@@ -128,20 +139,23 @@ async def _fetch_finnhub_news(ticker: str, client: httpx.AsyncClient) -> list[di
     today      = datetime.now(timezone.utc).date()
     from_date  = (datetime.now(timezone.utc) - timedelta(days=_ARTICLE_LOOKBACK_DAYS)).date()
 
+    resp = await guarded_get(
+        client, f"{_FINNHUB_BASE}/company-news",
+        params={
+            "symbol": ticker,
+            "from":   str(from_date),
+            "to":     str(today),
+            "token":  _FINNHUB_KEY,
+        },
+        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub company-news {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
+        return []
+
     try:
-        resp = await client.get(
-            f"{_FINNHUB_BASE}/company-news",
-            params={
-                "symbol": ticker,
-                "from":   str(from_date),
-                "to":     str(today),
-                "token":  _FINNHUB_KEY,
-            },
-        )
-        resp.raise_for_status()
         items = resp.json()
     except Exception as exc:
-        print(f"    [narrative] Finnhub news error for {ticker}: {exc}")
+        _log.warning("Finnhub company-news JSON parse error for %s: %s", ticker, exc)
         return []
 
     if not isinstance(items, list):
@@ -202,7 +216,7 @@ async def _run_narrative(ticker: str, client: httpx.AsyncClient) -> None:
             if await hash_exists(ticker, h):
                 continue
         except Exception as exc:
-            print(f"    [narrative] hash_exists error for {ticker}: {exc}")
+            _log.warning("hash_exists error for %s: %s", ticker, exc)
             continue
 
         try:
@@ -218,7 +232,7 @@ async def _run_narrative(ticker: str, client: httpx.AsyncClient) -> None:
                 content_hash       = article["content_hash"],
             )
         except Exception as exc:
-            print(f"    [narrative] insert_article error for {ticker}: {exc}")
+            _log.warning("insert_article error for %s: %s", ticker, exc)
 
 
 async def fetch_narrative_signals(

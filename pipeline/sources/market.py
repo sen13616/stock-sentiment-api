@@ -42,6 +42,12 @@ from db.queries.raw_signals import (
     get_volume_history,
     insert_signals,
 )
+from pipeline.rate_limits import (
+    AV_SEM, AV_DELAY,
+    FINNHUB_SEM, FINNHUB_DELAY,
+    POLYGON_SEM, POLYGON_DELAY,
+    guarded_get,
+)
 
 load_dotenv(override=False)
 
@@ -60,19 +66,18 @@ _POLYGON_BASE = "https://api.polygon.io"
 
 async def _ohlcv_av(ticker: str, client: httpx.AsyncClient) -> dict | None:
     """AV GLOBAL_QUOTE → {open, high, low, close, volume, timestamp}."""
+    resp = await guarded_get(
+        client, _AV_BASE,
+        params={"function": "GLOBAL_QUOTE", "symbol": ticker, "apikey": _AV_KEY},
+        sem=AV_SEM, delay=AV_DELAY, label=f"AV GLOBAL_QUOTE {ticker}",
+    )
+    if resp is None:
+        return None
+
     try:
-        resp = await client.get(
-            _AV_BASE,
-            params={
-                "function": "GLOBAL_QUOTE",
-                "symbol":   ticker,
-                "apikey":   _AV_KEY,
-            },
-        )
-        resp.raise_for_status()
         body = resp.json()
     except Exception as exc:
-        print(f"    [market] AV GLOBAL_QUOTE error for {ticker}: {exc}")
+        _log.warning("AV GLOBAL_QUOTE JSON parse error for %s: %s", ticker, exc)
         return None
 
     if "Note" in body or "Information" in body:
@@ -99,21 +104,24 @@ async def _ohlcv_av(ticker: str, client: httpx.AsyncClient) -> dict | None:
             "source":    "alpha_vantage",
         }
     except (KeyError, ValueError) as exc:
-        print(f"    [market] AV GLOBAL_QUOTE parse error for {ticker}: {exc}")
+        _log.warning("AV GLOBAL_QUOTE parse error for %s: %s", ticker, exc)
         return None
 
 
 async def _ohlcv_polygon(ticker: str, client: httpx.AsyncClient) -> dict | None:
     """Polygon /v2/aggs/ticker/{ticker}/prev fallback."""
+    resp = await guarded_get(
+        client, f"{_POLYGON_BASE}/v2/aggs/ticker/{ticker}/prev",
+        params={"adjusted": "true", "apiKey": _POLYGON_KEY},
+        sem=POLYGON_SEM, delay=POLYGON_DELAY, label=f"Polygon prev-day {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
+        return None
+
     try:
-        resp = await client.get(
-            f"{_POLYGON_BASE}/v2/aggs/ticker/{ticker}/prev",
-            params={"adjusted": "true", "apiKey": _POLYGON_KEY},
-        )
-        resp.raise_for_status()
         body = resp.json()
     except Exception as exc:
-        print(f"    [market] Polygon prev-day error for {ticker}: {exc}")
+        _log.warning("Polygon prev-day JSON parse error for %s: %s", ticker, exc)
         return None
 
     results = body.get("results", [])
@@ -133,7 +141,7 @@ async def _ohlcv_polygon(ticker: str, client: httpx.AsyncClient) -> dict | None:
             "source":    "polygon",
         }
     except (KeyError, ValueError) as exc:
-        print(f"    [market] Polygon prev-day parse error for {ticker}: {exc}")
+        _log.warning("Polygon prev-day parse error for %s: %s", ticker, exc)
         return None
 
 
@@ -143,22 +151,25 @@ async def _ohlcv_polygon(ticker: str, client: httpx.AsyncClient) -> dict | None:
 
 async def _rsi_av(ticker: str, client: httpx.AsyncClient) -> tuple[float, str] | None:
     """AV RSI(14, daily) → (value, timestamp_str)."""
+    resp = await guarded_get(
+        client, _AV_BASE,
+        params={
+            "function":    "RSI",
+            "symbol":      ticker,
+            "interval":    "daily",
+            "time_period": "14",
+            "series_type": "close",
+            "apikey":      _AV_KEY,
+        },
+        sem=AV_SEM, delay=AV_DELAY, label=f"AV RSI {ticker}",
+    )
+    if resp is None:
+        return None
+
     try:
-        resp = await client.get(
-            _AV_BASE,
-            params={
-                "function":    "RSI",
-                "symbol":      ticker,
-                "interval":    "daily",
-                "time_period": "14",
-                "series_type": "close",
-                "apikey":      _AV_KEY,
-            },
-        )
-        resp.raise_for_status()
         body = resp.json()
     except Exception as exc:
-        print(f"    [market] AV RSI error for {ticker}: {exc}")
+        _log.warning("AV RSI JSON parse error for %s: %s", ticker, exc)
         return None
 
     if "Note" in body or "Information" in body:
@@ -174,31 +185,34 @@ async def _rsi_av(ticker: str, client: httpx.AsyncClient) -> tuple[float, str] |
         ts = datetime.strptime(latest_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         return (rsi_val, ts)
     except (StopIteration, KeyError, ValueError) as exc:
-        print(f"    [market] AV RSI parse error for {ticker}: {exc}")
+        _log.warning("AV RSI parse error for %s: %s", ticker, exc)
         return None
 
 
 async def _rsi_finnhub(ticker: str, client: httpx.AsyncClient) -> float | None:
     """Finnhub /indicator RSI fallback — returns most recent RSI value."""
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    from_ts = now_ts - 86400 * 30  # 30 days back for indicator history
+
+    resp = await guarded_get(
+        client, f"{_FINNHUB_BASE}/indicator",
+        params={
+            "symbol":     ticker,
+            "resolution": "D",
+            "from":       from_ts,
+            "to":         now_ts,
+            "indicator":  "rsi",
+            "timeperiod": 14,
+            "token":      _FINNHUB_KEY,
+        },
+        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub RSI {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
+        return None
+
     try:
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        from_ts = now_ts - 86400 * 30  # 30 days back for indicator history
-        resp = await client.get(
-            f"{_FINNHUB_BASE}/indicator",
-            params={
-                "symbol":     ticker,
-                "resolution": "D",
-                "from":       from_ts,
-                "to":         now_ts,
-                "indicator":  "rsi",
-                "timeperiod": 14,
-                "token":      _FINNHUB_KEY,
-            },
-        )
-        resp.raise_for_status()
         body = resp.json()
-    except Exception as exc:
-        print(f"    [market] Finnhub RSI error for {ticker}: {exc}")
+    except Exception:
         return None
 
     rsi_list = body.get("rsi", [])
@@ -238,16 +252,19 @@ async def _pcr_iv_finnhub(
     Finnhub /stock/option-chain → (put_call_ratio, implied_volatility).
     IV is the mean of non-zero IV values across all near-term contracts.
     """
+    resp = await guarded_get(
+        client, f"{_FINNHUB_BASE}/stock/option-chain",
+        params={"symbol": ticker, "token": _FINNHUB_KEY},
+        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub option-chain {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
+        # 403 is expected on Finnhub free tier
+        _log.debug("Finnhub option-chain unavailable for %s", ticker)
+        return None, None
+
     try:
-        resp = await client.get(
-            f"{_FINNHUB_BASE}/stock/option-chain",
-            params={"symbol": ticker, "token": _FINNHUB_KEY},
-        )
-        resp.raise_for_status()
         body = resp.json()
-    except Exception as exc:
-        # 403 is expected on Finnhub free tier — keep this silent in production
-        _log.debug("Finnhub option-chain unavailable for %s: %s", ticker, exc)
+    except Exception:
         return None, None
 
     data = body.get("data", [])
@@ -272,16 +289,19 @@ async def _pcr_iv_finnhub(
 
 async def _pcr_polygon(ticker: str, client: httpx.AsyncClient) -> float | None:
     """Polygon /v3/snapshot/options/{ticker} PCR fallback."""
-    try:
-        resp = await client.get(
-            f"{_POLYGON_BASE}/v3/snapshot/options/{ticker}",
-            params={"limit": 250, "apiKey": _POLYGON_KEY},
-        )
-        resp.raise_for_status()
-        body = resp.json()
-    except Exception as exc:
+    resp = await guarded_get(
+        client, f"{_POLYGON_BASE}/v3/snapshot/options/{ticker}",
+        params={"limit": 250, "apiKey": _POLYGON_KEY},
+        sem=POLYGON_SEM, delay=POLYGON_DELAY, label=f"Polygon options {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
         # Options data requires paid tier on Polygon — keep fallback silent
-        _log.debug("Polygon options unavailable for %s: %s", ticker, exc)
+        _log.debug("Polygon options unavailable for %s", ticker)
+        return None
+
+    try:
+        body = resp.json()
+    except Exception:
         return None
 
     results = body.get("results", [])
@@ -313,16 +333,19 @@ async def _short_interest_finnhub(ticker: str, client: httpx.AsyncClient) -> flo
     Finnhub /stock/short-interest — shortInterestRatio (shares short / float).
     Returns the most recent ratio, or None.
     """
+    resp = await guarded_get(
+        client, f"{_FINNHUB_BASE}/stock/short-interest",
+        params={"symbol": ticker, "token": _FINNHUB_KEY},
+        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub short-interest {ticker}",
+    )
+    if resp is None or resp.status_code != 200:
+        # 403 is expected on Finnhub free tier
+        _log.debug("Finnhub short-interest unavailable for %s", ticker)
+        return None
+
     try:
-        resp = await client.get(
-            f"{_FINNHUB_BASE}/stock/short-interest",
-            params={"symbol": ticker, "token": _FINNHUB_KEY},
-        )
-        resp.raise_for_status()
         body = resp.json()
-    except Exception as exc:
-        # 403 is expected on Finnhub free tier — keep this silent in production
-        _log.debug("Finnhub short-interest unavailable for %s: %s", ticker, exc)
+    except Exception:
         return None
 
     data = body.get("data", [])

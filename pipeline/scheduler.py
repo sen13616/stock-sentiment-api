@@ -27,16 +27,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import time
 from datetime import datetime, timezone
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from tqdm import tqdm as _tqdm
+from tqdm.asyncio import tqdm as _atqdm
 
 from db.queries.universe import get_active_tickers
 from db.redis import get_redis
 from pipeline.orchestrator import _score_and_write
+from pipeline.rate_limits import job_counters
 from pipeline.sources.influencer import fetch_influencer_signals
 from pipeline.sources.macro import fetch_macro_signals
 from pipeline.sources.market import fetch_market_signals
@@ -45,6 +50,9 @@ from pipeline.sources.narrative import fetch_narrative_signals
 _log = logging.getLogger(__name__)
 
 _RUN_KEY_TTL = 7 * 24 * 3600  # 7 days
+
+# tqdm bar format used for both fetch and score phases
+_BAR_FMT = "{desc}: {bar:20} {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}"
 
 
 async def _record_run(job_id: str) -> None:
@@ -55,28 +63,86 @@ async def _record_run(job_id: str) -> None:
     except Exception as exc:
         _log.warning("_record_run failed for %s: %s", job_id, exc)
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _fetch_all_tickers(fetcher, tickers: list[str], client: httpx.AsyncClient) -> None:
-    """Fetch signals for all tickers in parallel, logging but not re-raising errors."""
-    results = await asyncio.gather(
-        *[fetcher(t, client) for t in tickers],
-        return_exceptions=True,
+async def _fetch_all_tickers(
+    fetcher,
+    tickers: list[str],
+    client: httpx.AsyncClient,
+    job_name: str = "",
+) -> None:
+    """
+    Fetch signals for all tickers in parallel, throttled by per-source semaphores.
+
+    A tqdm progress bar (written to stderr) shows live completion count, elapsed
+    time, ETA, and rate-limit / network-error skip counts from job_counters.
+    """
+    desc = f"[{job_name}] fetch" if job_name else "fetch"
+    pbar = _atqdm(
+        total=len(tickers),
+        desc=desc,
+        unit="tkr",
+        file=sys.stderr,
+        dynamic_ncols=True,
+        bar_format=_BAR_FMT,
     )
-    for ticker, result in zip(tickers, results):
-        if isinstance(result, BaseException):
-            _log.warning("fetch error for %s: %s", ticker, result)
 
-
-async def _score_all(tickers: list[str], job_name: str) -> None:
-    """Score all tickers sequentially to avoid overwhelming the DB."""
-    for ticker in tickers:
+    async def _tracked(ticker: str) -> None:
         try:
-            await _score_and_write(ticker)
+            await fetcher(ticker, client)
         except Exception as exc:
-            _log.error("%s: scoring failed for %s: %s", job_name, ticker, exc, exc_info=True)
+            _log.warning("fetch error for %s: %s", ticker, exc)
+        finally:
+            pbar.update(1)
+            pbar.set_postfix_str(
+                f"✗ rl={job_counters.rate_limit_skips} net={job_counters.net_error_skips}",
+                refresh=False,
+            )
+
+    await asyncio.gather(*[_tracked(t) for t in tickers])
+    pbar.close()
+
+
+async def _score_all(tickers: list[str], job_name: str) -> int:
+    """
+    Score all tickers sequentially to avoid overwhelming the DB.
+
+    A tqdm progress bar (written to stderr) shows the current ticker, live
+    scored count, elapsed time, and ETA.  Returns the count of successfully
+    scored tickers.
+    """
+    desc = f"[{job_name}] score" if job_name else "score"
+    scored = 0
+
+    with _tqdm(
+        total=len(tickers),
+        desc=desc,
+        unit="tkr",
+        file=sys.stderr,
+        dynamic_ncols=True,
+        bar_format=_BAR_FMT,
+    ) as pbar:
+        for ticker in tickers:
+            try:
+                await _score_and_write(ticker)
+                scored += 1
+            except Exception as exc:
+                _log.error(
+                    "%s: scoring failed for %s: %s", job_name, ticker, exc, exc_info=True
+                )
+            pbar.update(1)
+            pbar.set_postfix_str(f"{ticker} | ✓ {scored}", refresh=True)
+
+    return scored
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """Format elapsed seconds as 'Xm Ys'."""
+    mins, secs = divmod(int(seconds), 60)
+    return f"{mins}m {secs}s"
 
 
 # ---------------------------------------------------------------------------
@@ -90,16 +156,28 @@ async def market_job() -> None:
     Fetches OHLCV, RSI, options, and derived signals for all tier-1 tickers
     in parallel, then recomputes composite scores.
     """
+    job_counters.reset()
+    t_start = time.monotonic()
     _log.info("market_job: starting")
     tickers = await get_active_tickers()
-    _log.info("market_job: %d tickers", len(tickers))
+    n = len(tickers)
+    _log.info("market_job: %d tickers", n)
 
     async with httpx.AsyncClient(timeout=30) as client:
-        await _fetch_all_tickers(fetch_market_signals, tickers, client)
+        await _fetch_all_tickers(fetch_market_signals, tickers, client, job_name="MARKET")
 
-    await _score_all(tickers, "market_job")
+    scored = await _score_all(tickers, "MARKET")
     await _record_run("market")
-    _log.info("market_job: complete")
+
+    elapsed = time.monotonic() - t_start
+    print(
+        f"[MARKET] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        file=sys.stderr,
+    )
+    _log.info(
+        "market_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
+        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+    )
 
 
 async def market_eod_job() -> None:
@@ -111,16 +189,28 @@ async def market_eod_job() -> None:
     this job, users hitting the API outside market hours would see a null
     market layer for the entire overnight period.
     """
+    job_counters.reset()
+    t_start = time.monotonic()
     _log.info("market_eod_job: starting")
     tickers = await get_active_tickers()
-    _log.info("market_eod_job: %d tickers", len(tickers))
+    n = len(tickers)
+    _log.info("market_eod_job: %d tickers", n)
 
     async with httpx.AsyncClient(timeout=30) as client:
-        await _fetch_all_tickers(fetch_market_signals, tickers, client)
+        await _fetch_all_tickers(fetch_market_signals, tickers, client, job_name="MARKET_EOD")
 
-    await _score_all(tickers, "market_eod_job")
+    scored = await _score_all(tickers, "MARKET_EOD")
     await _record_run("market_eod")
-    _log.info("market_eod_job: complete — scored %d tickers", len(tickers))
+
+    elapsed = time.monotonic() - t_start
+    print(
+        f"[MARKET_EOD] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        file=sys.stderr,
+    )
+    _log.info(
+        "market_eod_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
+        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+    )
 
 
 async def narrative_job() -> None:
@@ -129,15 +219,27 @@ async def narrative_job() -> None:
 
     Fetches news articles for all tickers, deduplicates, and recomputes scores.
     """
+    job_counters.reset()
+    t_start = time.monotonic()
     _log.info("narrative_job: starting")
     tickers = await get_active_tickers()
+    n = len(tickers)
 
     async with httpx.AsyncClient(timeout=30) as client:
-        await _fetch_all_tickers(fetch_narrative_signals, tickers, client)
+        await _fetch_all_tickers(fetch_narrative_signals, tickers, client, job_name="NARRATIVE")
 
-    await _score_all(tickers, "narrative_job")
+    scored = await _score_all(tickers, "NARRATIVE")
     await _record_run("narrative")
-    _log.info("narrative_job: complete")
+
+    elapsed = time.monotonic() - t_start
+    print(
+        f"[NARRATIVE] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        file=sys.stderr,
+    )
+    _log.info(
+        "narrative_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
+        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+    )
 
 
 async def influencer_job() -> None:
@@ -146,15 +248,27 @@ async def influencer_job() -> None:
 
     Fetches SEC insider filings and analyst signals for all tickers.
     """
+    job_counters.reset()
+    t_start = time.monotonic()
     _log.info("influencer_job: starting")
     tickers = await get_active_tickers()
+    n = len(tickers)
 
     async with httpx.AsyncClient(timeout=30) as client:
-        await _fetch_all_tickers(fetch_influencer_signals, tickers, client)
+        await _fetch_all_tickers(fetch_influencer_signals, tickers, client, job_name="INFLUENCER")
 
-    await _score_all(tickers, "influencer_job")
+    scored = await _score_all(tickers, "INFLUENCER")
     await _record_run("influencer")
-    _log.info("influencer_job: complete")
+
+    elapsed = time.monotonic() - t_start
+    print(
+        f"[INFLUENCER] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        file=sys.stderr,
+    )
+    _log.info(
+        "influencer_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
+        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+    )
 
 
 async def macro_job() -> None:
@@ -164,6 +278,8 @@ async def macro_job() -> None:
     Fetches VIX and sector ETF data once (global, not per-ticker), then
     recomputes composite scores for all tickers using fresh macro signals.
     """
+    job_counters.reset()
+    t_start = time.monotonic()
     _log.info("macro_job: starting")
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -173,9 +289,19 @@ async def macro_job() -> None:
             _log.error("macro_job: macro fetch failed: %s", exc, exc_info=True)
 
     tickers = await get_active_tickers()
-    await _score_all(tickers, "macro_job")
+    n = len(tickers)
+    scored = await _score_all(tickers, "MACRO")
     await _record_run("macro")
-    _log.info("macro_job: complete")
+
+    elapsed = time.monotonic() - t_start
+    print(
+        f"[MACRO] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        file=sys.stderr,
+    )
+    _log.info(
+        "macro_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
+        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+    )
 
 
 # ---------------------------------------------------------------------------
