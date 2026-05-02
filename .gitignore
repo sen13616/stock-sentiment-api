@@ -8,3 +8,4 @@ tests/
 .tools/exports/
 tools/exports/
 exports/
+.DS_Store
