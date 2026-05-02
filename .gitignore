@@ -9,3 +9,6 @@ tests/
 tools/exports/
 exports/
 .DS_Store
+
+.env
+
