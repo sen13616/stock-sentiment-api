@@ -3,12 +3,13 @@ pipeline/scheduler.py
 
 APScheduler configuration for the background scoring pipeline (System A).
 
-Four jobs are registered, each responsible for one data layer:
+Jobs registered:
 
-    market_job      — weekdays 9 am–4 pm UTC, every 15 minutes
-    narrative_job   — every 30 minutes (24 × 7)
-    influencer_job  — every 6 hours
-    macro_job       — daily at 02:00 UTC
+    market_job       — weekdays 9 am–4 pm UTC, every 15 minutes
+    narrative_job    — every 30 minutes (24 × 7)
+    influencer_job   — every 6 hours
+    macro_job        — daily at 02:00 UTC
+    short_volume_job — weekdays at 21:30 UTC (FINRA REGSHO, data only)
 
 Each job:
   1. Fetches fresh signals from external APIs (in parallel for per-ticker layers)
@@ -32,6 +33,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
+import yfinance as yf
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -46,6 +48,7 @@ from pipeline.sources.influencer import fetch_influencer_signals
 from pipeline.sources.macro import fetch_macro_signals
 from pipeline.sources.market import fetch_market_signals
 from pipeline.sources.narrative import fetch_narrative_signals
+from pipeline.sources.short_volume import ingest_short_volume
 
 _log = logging.getLogger(__name__)
 
@@ -106,16 +109,25 @@ async def _fetch_all_tickers(
     pbar.close()
 
 
-async def _score_all(tickers: list[str], job_name: str) -> int:
+async def _score_all(
+    tickers: list[str],
+    job_name: str,
+    layers: set[str] | None = None,
+) -> tuple[int, int]:
     """
     Score all tickers sequentially to avoid overwhelming the DB.
 
-    A tqdm progress bar (written to stderr) shows the current ticker, live
-    scored count, elapsed time, and ETA.  Returns the count of successfully
-    scored tickers.
+    Parameters
+    ----------
+    layers : Passed through to _score_and_write(); only these layers are
+             recomputed, others are carried forward from Redis cache.
+             None = recompute all layers.
+
+    Returns (fetched_count, total_layers_populated).
     """
     desc = f"[{job_name}] score" if job_name else "score"
-    scored = 0
+    fetched = 0
+    total_layers = 0
 
     with _tqdm(
         total=len(tickers),
@@ -127,22 +139,98 @@ async def _score_all(tickers: list[str], job_name: str) -> int:
     ) as pbar:
         for ticker in tickers:
             try:
-                await _score_and_write(ticker)
-                scored += 1
+                n_layers = await _score_and_write(ticker, layers=layers)
+                fetched += 1
+                total_layers += n_layers
             except Exception as exc:
                 _log.error(
                     "%s: scoring failed for %s: %s", job_name, ticker, exc, exc_info=True
                 )
             pbar.update(1)
-            pbar.set_postfix_str(f"{ticker} | ✓ {scored}", refresh=True)
+            avg = total_layers / fetched if fetched else 0
+            pbar.set_postfix_str(f"{ticker} | ✓ {fetched} avg={avg:.1f}/4", refresh=True)
 
-    return scored
+    return fetched, total_layers
 
 
 def _fmt_elapsed(seconds: float) -> str:
     """Format elapsed seconds as 'Xm Ys'."""
     mins, secs = divmod(int(seconds), 60)
     return f"{mins}m {secs}s"
+
+
+# ---------------------------------------------------------------------------
+# yfinance batch OHLCV download
+# ---------------------------------------------------------------------------
+
+async def _yf_batch_download(tickers: list[str]) -> dict[str, dict]:
+    """
+    Download OHLCV data for all tickers in a single yfinance batch call.
+
+    Runs in a thread executor since yfinance is synchronous.
+
+    Returns
+    -------
+    dict mapping ticker → {open, high, low, close, volume, timestamp, source}.
+    Tickers that fail parsing are silently omitted (logged at WARNING).
+    """
+    loop = asyncio.get_running_loop()
+
+    def _download():
+        return yf.download(
+            tickers=tickers,
+            period="5d",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=True,
+            threads=True,
+            progress=False,
+        )
+
+    try:
+        raw = await loop.run_in_executor(None, _download)
+    except Exception as exc:
+        _log.error("yfinance batch download failed: %s", exc)
+        return {}
+
+    if raw.empty:
+        _log.warning("yfinance batch download returned empty DataFrame")
+        return {}
+
+    result: dict[str, dict] = {}
+    for ticker in tickers:
+        try:
+            if len(tickers) == 1:
+                df = raw
+            else:
+                df = raw[ticker]
+
+            if df.empty:
+                continue
+
+            valid = df.dropna(subset=["Close"])
+            if valid.empty:
+                continue
+
+            last = valid.iloc[-1]
+            ts = last.name.to_pydatetime()
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            result[ticker] = {
+                "open":      float(last["Open"]),
+                "high":      float(last["High"]),
+                "low":       float(last["Low"]),
+                "close":     float(last["Close"]),
+                "volume":    float(last["Volume"]),
+                "timestamp": ts,
+                "source":    "yfinance",
+            }
+        except Exception as exc:
+            _log.warning("yfinance parse error for %s: %s", ticker, exc)
+
+    _log.info("yfinance batch: %d/%d tickers parsed", len(result), len(tickers))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +241,9 @@ async def market_job() -> None:
     """
     Market layer job — weekdays 9 am–4 pm, every 15 minutes.
 
-    Fetches OHLCV, RSI, options, and derived signals for all tier-1 tickers
-    in parallel, then recomputes composite scores.
+    Batch-downloads OHLCV for all tickers via yfinance in one call, then
+    fetches RSI and derived signals per-ticker in parallel, and finally
+    recomputes composite scores.
     """
     job_counters.reset()
     t_start = time.monotonic()
@@ -163,20 +252,27 @@ async def market_job() -> None:
     n = len(tickers)
     _log.info("market_job: %d tickers", n)
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        await _fetch_all_tickers(fetch_market_signals, tickers, client, job_name="MARKET")
+    # Batch-download OHLCV for all tickers in one yfinance call
+    ohlcv_batch = await _yf_batch_download(tickers)
 
-    scored = await _score_all(tickers, "MARKET")
+    async def _market_fetcher(ticker: str, client: httpx.AsyncClient) -> None:
+        await fetch_market_signals(ticker, client, ohlcv_batch=ohlcv_batch)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        await _fetch_all_tickers(_market_fetcher, tickers, client, job_name="MARKET")
+
+    fetched, total_layers = await _score_all(tickers, "MARKET", layers={"market"})
     await _record_run("market")
 
     elapsed = time.monotonic() - t_start
+    avg = total_layers / fetched if fetched else 0
     print(
-        f"[MARKET] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        f"[MARKET] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
         file=sys.stderr,
     )
     _log.info(
-        "market_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
-        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "market_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
+        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
 
 
@@ -196,20 +292,26 @@ async def market_eod_job() -> None:
     n = len(tickers)
     _log.info("market_eod_job: %d tickers", n)
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        await _fetch_all_tickers(fetch_market_signals, tickers, client, job_name="MARKET_EOD")
+    ohlcv_batch = await _yf_batch_download(tickers)
 
-    scored = await _score_all(tickers, "MARKET_EOD")
+    async def _market_fetcher(ticker: str, client: httpx.AsyncClient) -> None:
+        await fetch_market_signals(ticker, client, ohlcv_batch=ohlcv_batch)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        await _fetch_all_tickers(_market_fetcher, tickers, client, job_name="MARKET_EOD")
+
+    fetched, total_layers = await _score_all(tickers, "MARKET_EOD", layers={"market"})
     await _record_run("market_eod")
 
     elapsed = time.monotonic() - t_start
+    avg = total_layers / fetched if fetched else 0
     print(
-        f"[MARKET_EOD] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        f"[MARKET_EOD] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
         file=sys.stderr,
     )
     _log.info(
-        "market_eod_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
-        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "market_eod_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
+        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
 
 
@@ -228,17 +330,18 @@ async def narrative_job() -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         await _fetch_all_tickers(fetch_narrative_signals, tickers, client, job_name="NARRATIVE")
 
-    scored = await _score_all(tickers, "NARRATIVE")
+    fetched, total_layers = await _score_all(tickers, "NARRATIVE", layers={"narrative"})
     await _record_run("narrative")
 
     elapsed = time.monotonic() - t_start
+    avg = total_layers / fetched if fetched else 0
     print(
-        f"[NARRATIVE] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        f"[NARRATIVE] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
         file=sys.stderr,
     )
     _log.info(
-        "narrative_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
-        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "narrative_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
+        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
 
 
@@ -257,17 +360,18 @@ async def influencer_job() -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         await _fetch_all_tickers(fetch_influencer_signals, tickers, client, job_name="INFLUENCER")
 
-    scored = await _score_all(tickers, "INFLUENCER")
+    fetched, total_layers = await _score_all(tickers, "INFLUENCER", layers={"influencer"})
     await _record_run("influencer")
 
     elapsed = time.monotonic() - t_start
+    avg = total_layers / fetched if fetched else 0
     print(
-        f"[INFLUENCER] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        f"[INFLUENCER] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
         file=sys.stderr,
     )
     _log.info(
-        "influencer_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
-        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "influencer_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
+        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
 
 
@@ -290,18 +394,50 @@ async def macro_job() -> None:
 
     tickers = await get_active_tickers()
     n = len(tickers)
-    scored = await _score_all(tickers, "MACRO")
+    fetched, total_layers = await _score_all(tickers, "MACRO", layers={"macro"})
     await _record_run("macro")
 
     elapsed = time.monotonic() - t_start
+    avg = total_layers / fetched if fetched else 0
     print(
-        f"[MACRO] done in {_fmt_elapsed(elapsed)} — {scored}/{n} scored, {n - scored} skipped",
+        f"[MACRO] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
         file=sys.stderr,
     )
     _log.info(
-        "macro_job complete: %d/%d tickers scored, %d rate-limit skips, %d net-error skips",
-        scored, n, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "macro_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
+        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
+
+
+async def short_volume_job() -> None:
+    """
+    Short volume job — weekdays at 21:30 UTC (30 min after market close).
+
+    Fetches the latest FINRA REGSHO daily short volume file, filters to the
+    active ticker universe, and writes three signals per ticker:
+    short_volume_otc, short_volume_total_otc, short_volume_ratio_otc.
+
+    This is a data-ingestion-only job — the signal types are not yet
+    registered in the scoring pipeline.
+    """
+    t_start = time.monotonic()
+    _log.info("short_volume_job: starting")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            n_tickers = await ingest_short_volume(client)
+    except Exception as exc:
+        _log.error("short_volume_job: failed: %s", exc, exc_info=True)
+        n_tickers = 0
+
+    await _record_run("short_volume")
+
+    elapsed = time.monotonic() - t_start
+    print(
+        f"[SHORT_VOLUME] done in {_fmt_elapsed(elapsed)} — {n_tickers} tickers written",
+        file=sys.stderr,
+    )
+    _log.info("short_volume_job complete: %d tickers in %.1fs", n_tickers, elapsed)
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +491,16 @@ scheduler.add_job(
     trigger=CronTrigger(hour=2, minute=0),
     id="macro",
     name="Macro context (daily 02:00 UTC)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=600,
+)
+
+scheduler.add_job(
+    short_volume_job,
+    trigger=CronTrigger(day_of_week="mon-fri", hour=21, minute=30),
+    id="short_volume",
+    name="FINRA short volume (21:30 UTC weekdays)",
     max_instances=1,
     coalesce=True,
     misfire_grace_time=600,
