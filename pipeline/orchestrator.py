@@ -38,22 +38,29 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from db.queries.raw_articles import get_articles_since
-from db.queries.raw_signals import get_latest_signal, get_signals_since
+from db.queries.raw_signals import get_latest_close, get_latest_signal, get_signals_since
 from pipeline.confidence.scorer import compute_confidence
-from pipeline.confidence.staleness import check_staleness, stale_sources
+from pipeline.confidence.staleness import (
+    _market_stale,
+    check_staleness,
+    filter_stale_signals,
+    market_lookback_since,
+    stale_sources,
+)
 from pipeline.explanation.templates import generate_explanation
 from pipeline.features.normalize import (
     score_influencer_signals,
     score_macro_signals,
     score_market_signals,
     score_narrative_signals,
+    score_short_volume_ratio,
 )
 from pipeline.persistence.pg_writer import persist_scored_state
 from pipeline.persistence.redis_writer import read_scored_state, write_scored_state
 from pipeline.scoring.composite import compute_composite
 from pipeline.scoring.divergence import compute_divergence
 from pipeline.scoring.drivers import extract_drivers
-from pipeline.scoring.subindices import SubIndexResult, compute_sub_index
+from pipeline.scoring.subindices import SubIndexResult, compute_market_sub_index, compute_sub_index
 from pipeline.sources.influencer import fetch_influencer_signals
 from pipeline.sources.macro import fetch_macro_signals
 from pipeline.sources.market import fetch_market_signals
@@ -89,7 +96,16 @@ _NARRATIVE_SCORE_LOOKBACK = timedelta(days=3)
 
 _MARKET_SIGNAL_TYPES = [
     "rsi_14", "return_1d", "return_5d", "return_20d",
-    "volume_ratio", "put_call_ratio", "short_interest_ratio", "implied_volatility",
+    "volume_ratio",
+    "order_flow_imbalance", "buy_pressure", "sell_pressure",
+    "bid_ask_spread_bps",
+    "short_volume_otc", "short_volume_total_otc", "short_volume_ratio_otc",
+]
+_MARKET_SIGNAL_TYPES_LEGACY = [
+    # Old signal types that may still exist in the DB from prior pipeline runs.
+    # Included so the scoring layer can pick them up if present.
+    "ohlcv_close", "ohlcv_open", "ohlcv_high", "ohlcv_low", "ohlcv_volume",
+    "put_call_ratio", "short_interest_ratio", "implied_volatility",
 ]
 _INFLUENCER_SIGNAL_TYPES = [
     "insider_net_shares", "analyst_buy_pct", "analyst_target_price",
@@ -142,7 +158,15 @@ def _fallback_subindex(
     freshness = last_state.get("freshness") or {}
     as_of     = _parse_ts(freshness.get(f"{layer}_as_of"))
 
-    if as_of is None or (now - as_of) > _LAYER_LOOKBACK[layer]:
+    if as_of is None:
+        return None, None
+
+    # Market layer: use market-hours-aware staleness (an EOD score stays
+    # fresh through the overnight period and entire weekend).
+    if layer == "market":
+        if _market_stale(as_of, now):
+            return None, None
+    elif (now - as_of) > _LAYER_LOOKBACK[layer]:
         return None, None
 
     entry = (last_state.get("sub_indices") or {}).get(layer)
@@ -160,6 +184,38 @@ def _fallback_subindex(
     return SubIndexResult(float(value), n_signals, sources), as_of
 
 
+def _carry_forward_layer(
+    layer: str,
+    last_state: dict | None,
+) -> tuple[SubIndexResult | None, list, datetime | None]:
+    """
+    Carry forward a sub-index unchanged from the last Redis state.
+
+    Used when a job only recomputes its own layer and preserves others.
+    Unlike _fallback_subindex, this does NOT apply a staleness check —
+    the value is passed through as-is because the layer is not being
+    updated by this job.
+    """
+    if not last_state:
+        return None, [], None
+
+    entry = (last_state.get("sub_indices") or {}).get(layer)
+    if entry is None:
+        return None, [], None
+
+    value     = entry.get("value") if isinstance(entry, dict) else float(entry)
+    n_signals = entry.get("n_signals", 1) if isinstance(entry, dict) else 1
+    sources   = entry.get("sources", [])  if isinstance(entry, dict) else []
+
+    if value is None:
+        return None, [], None
+
+    si = SubIndexResult(float(value), n_signals, sources)
+    freshness = (last_state or {}).get("freshness") or {}
+    as_of = _parse_ts(freshness.get(f"{layer}_as_of"))
+    return si, [], as_of
+
+
 # ---------------------------------------------------------------------------
 # Per-layer scoring  (read DB → normalize → sub-index → fallback if empty)
 # ---------------------------------------------------------------------------
@@ -169,11 +225,21 @@ async def _score_market(
     now: datetime,
     last_state: dict | None,
 ) -> tuple[SubIndexResult | None, list[dict], datetime | None]:
-    since = now - _LAYER_LOOKBACK["market"]
-    raw   = await get_signals_since(ticker, since, _MARKET_SIGNAL_TYPES)
+    since = market_lookback_since(now)
+    raw   = await get_signals_since(ticker, since, _MARKET_SIGNAL_TYPES + _MARKET_SIGNAL_TYPES_LEGACY)
+    raw   = filter_stale_signals(raw, now)
     if raw:
         sigs  = score_market_signals(ticker, raw, now)
-        si    = compute_sub_index(sigs)
+
+        # short_volume_ratio_otc uses a per-ticker rolling z-score that
+        # requires a DB read, so it's handled separately (async).
+        sv_rows = [r for r in raw if r["signal_type"] == "short_volume_ratio_otc"]
+        if sv_rows:
+            sv_sig = await score_short_volume_ratio(ticker, sv_rows[0], now)
+            if sv_sig is not None:
+                sigs.append(sv_sig)
+
+        si    = compute_market_sub_index(sigs)
         as_of = _latest_ts(raw)
         if si is not None:
             return si, sigs, as_of
@@ -259,28 +325,60 @@ async def _score_macro(
 # Core compute + persist  (no external API calls)
 # ---------------------------------------------------------------------------
 
-async def _score_and_write(ticker: str) -> dict | None:
+async def _score_and_write(
+    ticker: str,
+    layers: set[str] | None = None,
+) -> int:
     """
-    Read all layers from DB, compute the full scored state, and persist it.
+    Read layers from DB, compute the full scored state, and persist it.
 
     This is the inner scoring loop called by scheduler jobs after fetching.
     No external API calls are made here.
 
-    Returns the assembled state dict, or None if the composite is completely
-    missing (all layers failed and no Redis fallback available).
+    Parameters
+    ----------
+    ticker : str
+    layers : When set, only recompute these layers; carry forward others
+             from the Redis cache unchanged.  None = recompute all
+             (default for ad-hoc / score_ticker use).
+
+    Returns
+    -------
+    int — number of non-null sub-indices (0–4).
     """
     now        = datetime.now(timezone.utc)
     ticker     = ticker.upper()
     last_state = await read_scored_state(ticker)
 
     # Current close price (for analyst_target_price normalization)
-    current_price: float | None = await get_latest_signal(ticker, "ohlcv_close")
+    current_price: float | None = await get_latest_close(ticker)
 
     # ── Layer 07+08: feature engineering + sub-indices ────────────────────────
-    (market_si,     market_sigs,     market_as_of)                             = await _score_market(ticker, now, last_state)
-    (narrative_si,  narrative_sigs,  narrative_as_of)                          = await _score_narrative(ticker, now, last_state)
-    (influencer_si, influencer_sigs, influencer_as_of, analyst_as_of, insider_as_of) = await _score_influencer(ticker, now, last_state, current_price)
-    (macro_si,      macro_sigs,      macro_as_of)                              = await _score_macro(now, last_state)
+    # Each layer is either freshly recomputed (if in `layers`) or carried
+    # forward from the last Redis state to avoid overwriting valid data.
+
+    if layers is None or "market" in layers:
+        (market_si, market_sigs, market_as_of) = await _score_market(ticker, now, last_state)
+    else:
+        market_si, market_sigs, market_as_of = _carry_forward_layer("market", last_state)
+
+    if layers is None or "narrative" in layers:
+        (narrative_si, narrative_sigs, narrative_as_of) = await _score_narrative(ticker, now, last_state)
+    else:
+        narrative_si, narrative_sigs, narrative_as_of = _carry_forward_layer("narrative", last_state)
+
+    if layers is None or "influencer" in layers:
+        (influencer_si, influencer_sigs, influencer_as_of, analyst_as_of, insider_as_of) = await _score_influencer(ticker, now, last_state, current_price)
+    else:
+        influencer_si, influencer_sigs, influencer_as_of = _carry_forward_layer("influencer", last_state)
+        _freshness = (last_state or {}).get("freshness") or {}
+        analyst_as_of = _parse_ts(_freshness.get("influencer_as_of"))
+        insider_as_of = analyst_as_of
+
+    if layers is None or "macro" in layers:
+        (macro_si, macro_sigs, macro_as_of) = await _score_macro(now, last_state)
+    else:
+        macro_si, macro_sigs, macro_as_of = _carry_forward_layer("macro", last_state)
 
     sub_indices: dict = {
         "market":     market_si,
@@ -354,15 +452,18 @@ async def _score_and_write(ticker: str) -> dict | None:
     await write_scored_state(ticker, state)
     await persist_scored_state(state)
 
+    n_populated = sum(1 for v in sub_indices.values() if v is not None)
+
     _log.info(
-        "[%s] scored  composite=%.1f  confidence=%d  divergence=%s  missing=%s",
+        "[%s] scored  composite=%.1f  confidence=%d  divergence=%s  missing=%s  layers=%d/4",
         ticker,
         effective_score,
         conf_result.score,
         div_result.flag,
         composite_result.missing_layers or "none",
+        n_populated,
     )
-    return state
+    return n_populated
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +473,7 @@ async def _score_and_write(ticker: str) -> dict | None:
 async def score_ticker(
     ticker: str,
     layer_scope: str | None = None,
-) -> dict | None:
+) -> None:
     """
     Fetch fresh data for `layer_scope` then compute and persist the scored state.
 
@@ -385,10 +486,6 @@ async def score_ticker(
     layer_scope : Which layer to freshly fetch from external APIs.
                   None = all four layers.
                   "market" | "narrative" | "influencer" | "macro"
-
-    Returns
-    -------
-    dict — assembled scored state, or None on unrecoverable error.
     """
     ticker = ticker.upper()
 
@@ -409,4 +506,4 @@ async def score_ticker(
                 if isinstance(result, BaseException):
                     _log.warning("[%s] source fetch error: %s", ticker, result)
 
-    return await _score_and_write(ticker)
+    await _score_and_write(ticker)

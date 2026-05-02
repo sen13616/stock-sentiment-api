@@ -4,19 +4,29 @@ pipeline/scoring/subindices.py
 Computes a single sub-index value (0–100) from a collection of pre-scored,
 pre-weighted signals belonging to one data layer.
 
-Formula (spec §Mathematics)
----------------------------
+Generic formula (spec §Mathematics)
+------------------------------------
     raw   = Σ(w_i × score_i) / Σ(w_i)         weighted average
     value = 50 + min(1, n/5) × (raw − 50)      volume shrinkage toward neutral
 
 The shrinkage factor `min(1, n/5)` pulls the result toward 50 when fewer
 than 5 signals are present, guarding against single-signal overconfidence.
 
+Market sub-index (structured 5-component aggregation)
+------------------------------------------------------
+    The market layer uses a dedicated ``compute_market_sub_index()`` that
+    combines five component groups with explicit weights:
+        returns (0.35), momentum (0.15), order_flow (0.25),
+        liquidity (0.10), short_volume (0.15).
+    Missing components have their weight redistributed proportionally.
+
 Expected input per signal dict
 -------------------------------
     score  : float in [0, 100]  — z-scaled, direction-corrected (50 = neutral)
     weight : float > 0          — combined w_source × w_confidence × w_time
     source : str                — data source label
+    signal_type : str           — e.g. "rsi_14", "return_1d" (used by market sub-index)
+    value  : float              — raw un-normalized value (used for RSI momentum conversion)
 
 Returns None (missing layer) when the signal list is empty or all weights
 are zero.  The orchestration layer redistributes composite weight accordingly.
@@ -67,5 +77,134 @@ def compute_sub_index(signals: list[dict]) -> SubIndexResult | None:
     return SubIndexResult(
         value=round(value, 4),
         n_signals=n,
+        sources=sources,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Market sub-index — structured 5-component aggregation
+# ---------------------------------------------------------------------------
+
+# Tunable component weights — will be revisited during empirical validation
+# in the research paper Phase C.  Must sum to 1.0.
+MARKET_COMPONENT_WEIGHTS: dict[str, float] = {
+    "returns":      0.35,
+    "momentum":     0.15,
+    "order_flow":   0.25,
+    "liquidity":    0.10,
+    "short_volume": 0.15,
+}
+
+# Signal types that feed each component
+_RETURNS_TYPES = frozenset({"return_1d", "return_5d", "return_20d"})
+_COMPONENT_TYPES = _RETURNS_TYPES | {
+    "rsi_14", "order_flow_imbalance", "bid_ask_spread_bps",
+    "short_volume_ratio_otc",
+}
+
+
+def compute_market_sub_index(signals: list[dict]) -> SubIndexResult | None:
+    """
+    Compute the market sub-index using a structured 5-component weighted
+    average.
+
+    Components (all converted to [-1, +1] before weighting)
+    ---------------------------------------------------------
+        returns      (0.35) — mean of return_1d / return_5d / return_20d scores
+        momentum     (0.15) — rsi_14 as a *momentum* indicator (NOT contrarian).
+                              RSI 70 → +1 (strong upward momentum = bullish).
+                              This is intentional: the sub-index treats RSI as a
+                              trend-following signal.  The contrarian interpretation
+                              (overbought = bearish) is surfaced in the driver
+                              description instead.
+        order_flow   (0.25) — order_flow_imbalance (CLV); close near high = +1
+        liquidity    (0.10) — bid_ask_spread_bps; wider spread = -1 (bearish)
+        short_volume (0.15) — short_volume_ratio_otc z-score; higher recent
+                              short volume relative to 20d history = bearish.
+                              Already negated by the normalizer: score > 50 = bullish.
+
+    Missing-signal handling
+    -----------------------
+    If a component has no valid signals, its weight is redistributed
+    proportionally across present components (avoids biasing toward neutral).
+    If 4 of 5 components are missing the layer is considered missing entirely
+    and None is returned.
+
+    Parameters
+    ----------
+    signals : list[dict]
+        Pre-scored signal dicts from ``score_market_signals()``.  Only those
+        with signal_type in the five component groups contribute to the
+        sub-index; others (volume_ratio, buy_pressure, etc.) are silently
+        ignored here but still available for driver extraction.
+
+    Returns
+    -------
+    SubIndexResult or None when fewer than 2 components are present.
+    """
+    # ── Group valid signals by signal_type ────────────────────────────────
+    by_type: dict[str, list[dict]] = {}
+    for s in signals:
+        if (s.get("weight") or 0) > 0:
+            by_type.setdefault(s["signal_type"], []).append(s)
+
+    # ── Build per-component values in [-1, +1] ───────────────────────────
+    components: dict[str, float] = {}
+
+    # Returns — average of available return periods, each already in [0,100]
+    ret_vals: list[float] = []
+    for rt in ("return_1d", "return_5d", "return_20d"):
+        if rt in by_type:
+            best = by_type[rt][0]          # most recent (DESC from DB)
+            ret_vals.append((best["score"] - 50.0) / 50.0)
+    if ret_vals:
+        components["returns"] = sum(ret_vals) / len(ret_vals)
+
+    # Momentum — raw RSI → [-1, +1] via momentum mapping
+    # RSI 70 → +1, RSI 50 → 0, RSI 30 → -1
+    if "rsi_14" in by_type:
+        rsi_raw = float(by_type["rsi_14"][0]["value"])
+        components["momentum"] = max(-1.0, min(1.0, (rsi_raw - 50.0) / 20.0))
+
+    # Order flow — CLV already direction-correct in scorer (> 50 = bullish)
+    if "order_flow_imbalance" in by_type:
+        s = by_type["order_flow_imbalance"][0]
+        components["order_flow"] = (s["score"] - 50.0) / 50.0
+
+    # Liquidity — wider spread = lower score (bearish) in scorer
+    if "bid_ask_spread_bps" in by_type:
+        s = by_type["bid_ask_spread_bps"][0]
+        components["liquidity"] = (s["score"] - 50.0) / 50.0
+
+    # Short volume — z-score already direction-corrected by normalizer
+    # (high short volume = bearish → low score; low short volume = bullish → high score)
+    if "short_volume_ratio_otc" in by_type:
+        s = by_type["short_volume_ratio_otc"][0]
+        components["short_volume"] = (s["score"] - 50.0) / 50.0
+
+    # ── 4 of 5 missing → layer missing ───────────────────────────────────
+    if len(components) <= 1:
+        return None
+
+    # ── Redistribute weights across present components ────────────────────
+    present_w = sum(MARKET_COMPONENT_WEIGHTS[c] for c in components)
+    effective = {c: MARKET_COMPONENT_WEIGHTS[c] / present_w for c in components}
+
+    # ── Weighted average in [-1, +1] space ────────────────────────────────
+    combined = sum(effective[c] * components[c] for c in components)
+
+    # ── Convert to [0, 100] ───────────────────────────────────────────────
+    value = 50.0 + 50.0 * max(-1.0, min(1.0, combined))
+
+    # ── Collect metadata ──────────────────────────────────────────────────
+    valid = [
+        s for s in signals
+        if (s.get("weight") or 0) > 0 and s.get("signal_type") in _COMPONENT_TYPES
+    ]
+    sources = sorted({s["source"] for s in valid})
+
+    return SubIndexResult(
+        value=round(value, 4),
+        n_signals=len(valid),
         sources=sources,
     )

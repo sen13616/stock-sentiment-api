@@ -5,29 +5,25 @@ Fetches live market signals for a single ticker and writes them to raw_signals.
 
 Signals produced
 ----------------
-ohlcv_open / ohlcv_high / ohlcv_low / ohlcv_close / ohlcv_volume
-  Primary:  Alpha Vantage GLOBAL_QUOTE
-  Fallback: Polygon /v2/aggs/ticker/{ticker}/prev
+yf_open / yf_high / yf_low / yf_close / yf_volume
+  Primary:  yfinance batch download (called once in scheduler, passed in)
+  Fallback: Polygon /v2/aggs/ticker/{ticker}/prev  (ohlcv_* signal types)
+
+bid_ask_spread / bid_ask_spread_bps / bid / ask
+  Fetched: yfinance Ticker.info (market hours only)
 
 rsi_14
-  Primary:  Alpha Vantage RSI (daily, period=14)
-  Fallback: Finnhub /indicator (rsi)
+  Computed: Wilder's smoothed RSI(14) from DB close-price history
 
-put_call_ratio
-  Primary:  Finnhub /stock/option-chain  (put OI / call OI)
-  Fallback: Polygon /v3/snapshot/options/{ticker}
-
-short_interest_ratio
-  Source:   Finnhub /stock/short-interest  (no fallback; updates bimonthly)
-
-implied_volatility
-  Source:   Finnhub /stock/option-chain (mean IV of near-term contracts)
+order_flow_imbalance / buy_pressure / sell_pressure
+  Computed: Lee-Ready OHLCV proxy (close location value) from current bar
 
 return_1d / return_5d / return_20d / volume_ratio
   Computed: from DB close/volume history vs current live close/volume
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -42,71 +38,22 @@ from db.queries.raw_signals import (
     get_volume_history,
     insert_signals,
 )
+from pipeline.confidence.staleness import is_market_hours
 from pipeline.rate_limits import (
-    AV_SEM, AV_DELAY,
-    FINNHUB_SEM, FINNHUB_DELAY,
     POLYGON_SEM, POLYGON_DELAY,
+    YF_INFO_SEM,
     guarded_get,
 )
 
 load_dotenv(override=False)
 
-_AV_KEY      = os.environ.get("ALPHA_VANTAGE_KEY", "")
-_FINNHUB_KEY = os.environ.get("FINNHUB_KEY", "")
-_POLYGON_KEY = os.environ.get("POLYGON_KEY", "")
-
-_AV_BASE      = "https://www.alphavantage.co/query"
-_FINNHUB_BASE = "https://finnhub.io/api/v1"
+_POLYGON_KEY  = os.environ.get("POLYGON_KEY", "")
 _POLYGON_BASE = "https://api.polygon.io"
 
 
 # ---------------------------------------------------------------------------
 # OHLCV helpers
 # ---------------------------------------------------------------------------
-
-async def _ohlcv_av(ticker: str, client: httpx.AsyncClient) -> dict | None:
-    """AV GLOBAL_QUOTE → {open, high, low, close, volume, timestamp}."""
-    resp = await guarded_get(
-        client, _AV_BASE,
-        params={"function": "GLOBAL_QUOTE", "symbol": ticker, "apikey": _AV_KEY},
-        sem=AV_SEM, delay=AV_DELAY, label=f"AV GLOBAL_QUOTE {ticker}",
-    )
-    if resp is None:
-        return None
-
-    try:
-        body = resp.json()
-    except Exception as exc:
-        _log.warning("AV GLOBAL_QUOTE JSON parse error for %s: %s", ticker, exc)
-        return None
-
-    if "Note" in body or "Information" in body:
-        return None
-
-    q = body.get("Global Quote", {})
-    if not q or not q.get("05. price"):
-        return None
-
-    try:
-        trading_day = q.get("07. latest trading day", "")
-        ts = (
-            datetime.strptime(trading_day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            if trading_day
-            else datetime.now(timezone.utc)
-        )
-        return {
-            "open":      float(q["02. open"]),
-            "high":      float(q["03. high"]),
-            "low":       float(q["04. low"]),
-            "close":     float(q["05. price"]),
-            "volume":    float(q["06. volume"]),
-            "timestamp": ts,
-            "source":    "alpha_vantage",
-        }
-    except (KeyError, ValueError) as exc:
-        _log.warning("AV GLOBAL_QUOTE parse error for %s: %s", ticker, exc)
-        return None
-
 
 async def _ohlcv_polygon(ticker: str, client: httpx.AsyncClient) -> dict | None:
     """Polygon /v2/aggs/ticker/{ticker}/prev fallback."""
@@ -146,219 +93,126 @@ async def _ohlcv_polygon(ticker: str, client: httpx.AsyncClient) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# RSI helpers
+# Bid-ask spread (yfinance Ticker.info)
 # ---------------------------------------------------------------------------
 
-async def _rsi_av(ticker: str, client: httpx.AsyncClient) -> tuple[float, str] | None:
-    """AV RSI(14, daily) → (value, timestamp_str)."""
-    resp = await guarded_get(
-        client, _AV_BASE,
-        params={
-            "function":    "RSI",
-            "symbol":      ticker,
-            "interval":    "daily",
-            "time_period": "14",
-            "series_type": "close",
-            "apikey":      _AV_KEY,
-        },
-        sem=AV_SEM, delay=AV_DELAY, label=f"AV RSI {ticker}",
-    )
-    if resp is None:
-        return None
+def _fetch_bid_ask_spread(ticker: str) -> dict | None:
+    """
+    Fetch the current bid/ask quote via ``yf.Ticker(ticker).info`` and
+    compute the spread in both raw dollars and basis points.
+
+    This is a **blocking** call — always run via ``asyncio.to_thread``.
+
+    Returns
+    -------
+    dict with keys ``bid``, ``ask``, ``spread``, ``spread_bps``,
+    ``midpoint``, or None on any failure.
+    """
+    import yfinance as yf
 
     try:
-        body = resp.json()
-    except Exception as exc:
-        _log.warning("AV RSI JSON parse error for %s: %s", ticker, exc)
-        return None
-
-    if "Note" in body or "Information" in body:
-        return None
-
-    ts_data = body.get("Technical Analysis: RSI", {})
-    if not ts_data:
-        return None
-
-    try:
-        latest_date = next(iter(ts_data))
-        rsi_val = float(ts_data[latest_date]["RSI"])
-        ts = datetime.strptime(latest_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        return (rsi_val, ts)
-    except (StopIteration, KeyError, ValueError) as exc:
-        _log.warning("AV RSI parse error for %s: %s", ticker, exc)
-        return None
-
-
-async def _rsi_finnhub(ticker: str, client: httpx.AsyncClient) -> float | None:
-    """Finnhub /indicator RSI fallback — returns most recent RSI value."""
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    from_ts = now_ts - 86400 * 30  # 30 days back for indicator history
-
-    resp = await guarded_get(
-        client, f"{_FINNHUB_BASE}/indicator",
-        params={
-            "symbol":     ticker,
-            "resolution": "D",
-            "from":       from_ts,
-            "to":         now_ts,
-            "indicator":  "rsi",
-            "timeperiod": 14,
-            "token":      _FINNHUB_KEY,
-        },
-        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub RSI {ticker}",
-    )
-    if resp is None or resp.status_code != 200:
-        return None
-
-    try:
-        body = resp.json()
+        info = yf.Ticker(ticker).info
     except Exception:
         return None
 
-    rsi_list = body.get("rsi", [])
-    if not rsi_list:
+    bid = info.get("bid")
+    ask = info.get("ask")
+
+    if bid is None or ask is None:
+        return None
+    if bid <= 0 or ask <= 0 or ask < bid:
         return None
 
-    # last element is most recent; filter None values
-    valid = [v for v in rsi_list if v is not None]
-    return float(valid[-1]) if valid else None
+    midpoint = (bid + ask) / 2.0
+    spread_bps = ((ask - bid) / midpoint) * 10_000
+
+    return {
+        "bid":        round(bid, 4),
+        "ask":        round(ask, 4),
+        "spread":     round(ask - bid, 4),
+        "spread_bps": round(spread_bps, 2),
+        "midpoint":   round(midpoint, 4),
+    }
 
 
 # ---------------------------------------------------------------------------
-# Put/call ratio helpers
+# RSI computation
 # ---------------------------------------------------------------------------
 
-def _pcr_from_chain(data: list) -> float | None:
-    """Compute put/call OI ratio from Finnhub option-chain data list."""
-    total_call_oi = 0.0
-    total_put_oi  = 0.0
-    for expiry in data:
-        opts = expiry.get("options", {})
-        for contract in opts.get("CALL", []):
-            total_call_oi += float(contract.get("openInterest") or 0)
-        for contract in opts.get("PUT", []):
-            total_put_oi += float(contract.get("openInterest") or 0)
-
-    if total_call_oi == 0:
-        return None
-    return round(total_put_oi / total_call_oi, 4)
-
-
-async def _pcr_iv_finnhub(
-    ticker: str,
-    client: httpx.AsyncClient,
-) -> tuple[float | None, float | None]:
+def _compute_rsi(closes: list[float], period: int = 14) -> float | None:
     """
-    Finnhub /stock/option-chain → (put_call_ratio, implied_volatility).
-    IV is the mean of non-zero IV values across all near-term contracts.
+    Compute Wilder's smoothed RSI from a chronological series of close prices.
+
+    Uses SMA for the initial seed, then Wilder's exponential smoothing for
+    remaining data points.  More history → more stable output.
+
+    Parameters
+    ----------
+    closes : Close prices sorted ascending (oldest first).
+             Must have at least ``period + 1`` entries (15 for RSI-14).
+    period : RSI lookback period (default 14).
+
+    Returns
+    -------
+    RSI value (0–100), or None if insufficient data.
     """
-    resp = await guarded_get(
-        client, f"{_FINNHUB_BASE}/stock/option-chain",
-        params={"symbol": ticker, "token": _FINNHUB_KEY},
-        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub option-chain {ticker}",
-    )
-    if resp is None or resp.status_code != 200:
-        # 403 is expected on Finnhub free tier
-        _log.debug("Finnhub option-chain unavailable for %s", ticker)
-        return None, None
-
-    try:
-        body = resp.json()
-    except Exception:
-        return None, None
-
-    data = body.get("data", [])
-    if not data:
-        return None, None
-
-    pcr = _pcr_from_chain(data)
-
-    # IV: mean of all non-zero impliedVolatility values
-    iv_values: list[float] = []
-    for expiry in data:
-        opts = expiry.get("options", {})
-        for side in ("CALL", "PUT"):
-            for contract in opts.get(side, []):
-                iv = contract.get("impliedVolatility")
-                if iv and iv > 0:
-                    iv_values.append(float(iv))
-
-    iv = round(sum(iv_values) / len(iv_values), 4) if iv_values else None
-    return pcr, iv
-
-
-async def _pcr_polygon(ticker: str, client: httpx.AsyncClient) -> float | None:
-    """Polygon /v3/snapshot/options/{ticker} PCR fallback."""
-    resp = await guarded_get(
-        client, f"{_POLYGON_BASE}/v3/snapshot/options/{ticker}",
-        params={"limit": 250, "apiKey": _POLYGON_KEY},
-        sem=POLYGON_SEM, delay=POLYGON_DELAY, label=f"Polygon options {ticker}",
-    )
-    if resp is None or resp.status_code != 200:
-        # Options data requires paid tier on Polygon — keep fallback silent
-        _log.debug("Polygon options unavailable for %s", ticker)
+    if len(closes) < period + 1:
         return None
 
-    try:
-        body = resp.json()
-    except Exception:
-        return None
+    changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
 
-    results = body.get("results", [])
-    if not results:
-        return None
+    # SMA seed from first `period` changes
+    avg_gain = sum(max(c, 0) for c in changes[:period]) / period
+    avg_loss = sum(-min(c, 0) for c in changes[:period]) / period
 
-    call_oi = sum(
-        float(r.get("open_interest") or 0)
-        for r in results
-        if r.get("details", {}).get("contract_type") == "call"
-    )
-    put_oi = sum(
-        float(r.get("open_interest") or 0)
-        for r in results
-        if r.get("details", {}).get("contract_type") == "put"
-    )
+    # Wilder's exponential smoothing for remaining changes
+    for c in changes[period:]:
+        avg_gain = (avg_gain * (period - 1) + max(c, 0)) / period
+        avg_loss = (avg_loss * (period - 1) + (-min(c, 0))) / period
 
-    if call_oi == 0:
-        return None
-    return round(put_oi / call_oi, 4)
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 2)
 
 
 # ---------------------------------------------------------------------------
-# Short interest
+# Order flow (Lee-Ready OHLCV proxy)
 # ---------------------------------------------------------------------------
 
-async def _short_interest_finnhub(ticker: str, client: httpx.AsyncClient) -> float | None:
+def _compute_order_flow(ohlcv: dict) -> list[tuple[str, float]]:
     """
-    Finnhub /stock/short-interest — shortInterestRatio (shares short / float).
-    Returns the most recent ratio, or None.
+    Estimate buy/sell pressure from a single OHLCV bar using the Close
+    Location Value — the standard OHLCV proxy for Lee & Ready (1991)
+    trade classification.
+
+    CLV = (2·close − high − low) / (high − low), ranging from −1 (close
+    at the low) to +1 (close at the high).  Volume is then split
+    proportionally into buyer- and seller-initiated fractions.
+
+    Returns
+    -------
+    [(signal_type, value)] for order_flow_imbalance, buy_pressure,
+    sell_pressure.  Empty list if the bar is degenerate (zero volume or
+    high == low).
     """
-    resp = await guarded_get(
-        client, f"{_FINNHUB_BASE}/stock/short-interest",
-        params={"symbol": ticker, "token": _FINNHUB_KEY},
-        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub short-interest {ticker}",
-    )
-    if resp is None or resp.status_code != 200:
-        # 403 is expected on Finnhub free tier
-        _log.debug("Finnhub short-interest unavailable for %s", ticker)
-        return None
+    high   = ohlcv["high"]
+    low    = ohlcv["low"]
+    close  = ohlcv["close"]
+    volume = ohlcv["volume"]
 
-    try:
-        body = resp.json()
-    except Exception:
-        return None
+    if volume <= 0 or high == low:
+        return []
 
-    data = body.get("data", [])
-    if not data:
-        return None
+    clv = (2.0 * close - high - low) / (high - low)
+    buy_frac = (1.0 + clv) / 2.0
 
-    # data is sorted descending; take the most recent entry
-    try:
-        latest = data[0]
-        ratio = latest.get("shortInterestRatio") or latest.get("shortInterest")
-        return float(ratio) if ratio is not None else None
-    except (IndexError, TypeError, ValueError):
-        return None
+    return [
+        ("order_flow_imbalance", round(clv, 4)),
+        ("buy_pressure",         round(buy_frac, 4)),
+        ("sell_pressure",        round(1.0 - buy_frac, 4)),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -409,54 +263,77 @@ def _compute_volume_ratio(
 # Public entry point
 # ---------------------------------------------------------------------------
 
-async def _run_market(ticker: str, client: httpx.AsyncClient) -> None:
-    """Core implementation — requires a live client."""
+async def _run_market(
+    ticker: str,
+    client: httpx.AsyncClient,
+    ohlcv_batch: dict | None = None,
+) -> None:
+    """Core implementation — requires a live client.
+
+    Parameters
+    ----------
+    ohlcv_batch : Pre-fetched OHLCV dict from yfinance batch download.
+                  ``{ticker: {open, high, low, close, volume, timestamp, source}}``.
+                  When provided, the ticker's data is read from memory instead
+                  of making an HTTP call.  Polygon is used as fallback for
+                  tickers missing from the batch.
+    """
     now = datetime.now(timezone.utc)
     rows: list[tuple] = []
 
-    # --- OHLCV (primary: AV, fallback: Polygon) ---
-    ohlcv = await _ohlcv_av(ticker, client)
+    # --- OHLCV (primary: yfinance batch, fallback: Polygon) ---
+    ohlcv = (ohlcv_batch or {}).get(ticker)
     if ohlcv is None:
         ohlcv = await _ohlcv_polygon(ticker, client)
 
     if ohlcv:
         src = ohlcv["source"]
         ts  = ohlcv["timestamp"]
+        # yfinance data → yf_* signal types; Polygon fallback → ohlcv_*
+        pfx = "yf" if src == "yfinance" else "ohlcv"
         rows.extend([
-            (ticker, "ohlcv_open",   ohlcv["open"],   src, "live", ts),
-            (ticker, "ohlcv_high",   ohlcv["high"],   src, "live", ts),
-            (ticker, "ohlcv_low",    ohlcv["low"],    src, "live", ts),
-            (ticker, "ohlcv_close",  ohlcv["close"],  src, "live", ts),
-            (ticker, "ohlcv_volume", ohlcv["volume"], src, "live", ts),
+            (ticker, f"{pfx}_open",   ohlcv["open"],   src, "live", ts),
+            (ticker, f"{pfx}_high",   ohlcv["high"],   src, "live", ts),
+            (ticker, f"{pfx}_low",    ohlcv["low"],    src, "live", ts),
+            (ticker, f"{pfx}_close",  ohlcv["close"],  src, "live", ts),
+            (ticker, f"{pfx}_volume", ohlcv["volume"], src, "live", ts),
         ])
 
-    # --- RSI (primary: AV, fallback: Finnhub) ---
-    rsi_result = await _rsi_av(ticker, client)
-    if rsi_result is not None:
-        rsi_val, rsi_ts = rsi_result
-        rows.append((ticker, "rsi_14", rsi_val, "alpha_vantage", "live", rsi_ts))
-    else:
-        rsi_fallback = await _rsi_finnhub(ticker, client)
-        if rsi_fallback is not None:
-            rows.append((ticker, "rsi_14", rsi_fallback, "finnhub", "live", now))
+    # --- Bid-ask spread (yfinance .info, market hours only) ---
+    if is_market_hours(now):
+        async with YF_INFO_SEM:
+            ba = await asyncio.to_thread(_fetch_bid_ask_spread, ticker)
+        if ba is not None:
+            _log.info("bid_ask_spread %s bps=%.2f", ticker, ba["spread_bps"])
+            rows.extend([
+                (ticker, "bid_ask_spread",     ba["spread"],     "yfinance", "live", now),
+                (ticker, "bid_ask_spread_bps", ba["spread_bps"], "yfinance", "live", now),
+                (ticker, "bid",                ba["bid"],        "yfinance", "live", now),
+                (ticker, "ask",                ba["ask"],        "yfinance", "live", now),
+            ])
+        else:
+            _log.debug("bid_ask_spread %s: no data", ticker)
 
-    # --- PCR + IV (primary: Finnhub option chain, PCR fallback: Polygon) ---
-    pcr, iv = await _pcr_iv_finnhub(ticker, client)
-    if pcr is None:
-        pcr = await _pcr_polygon(ticker, client)
-    if pcr is not None:
-        rows.append((ticker, "put_call_ratio", pcr, "finnhub", "live", now))
-    if iv is not None:
-        rows.append((ticker, "implied_volatility", iv, "finnhub", "live", now))
-
-    # --- Short interest (Finnhub only; no fallback — updates bimonthly) ---
-    si = await _short_interest_finnhub(ticker, client)
-    if si is not None:
-        rows.append((ticker, "short_interest_ratio", si, "finnhub", "live", now))
-
-    # --- Computed: returns and volume ratio ---
+    # --- Order flow (Lee-Ready proxy from current OHLCV bar) ---
     if ohlcv:
-        close_history  = await get_close_history(ticker, limit=22)
+        for sig_type, val in _compute_order_flow(ohlcv):
+            rows.append((ticker, sig_type, val, "computed", "live", now))
+
+    # --- Computed: RSI, returns, volume ratio ---
+    # Fetch close history once — shared by RSI (needs 15+) and returns (needs 20).
+    # Request 50 rows so Wilder's smoothing has room to stabilise.
+    close_history = await get_close_history(ticker, limit=50)
+
+    # RSI(14) from historical closes + current close (if available)
+    closes_for_rsi = [c for _, c in close_history]
+    if ohlcv:
+        closes_for_rsi.append(ohlcv["close"])
+    rsi = _compute_rsi(closes_for_rsi)
+    if rsi is not None:
+        rows.append((ticker, "rsi_14", rsi, "computed", "live", now))
+
+    # Returns and volume ratio (require a current live close)
+    if ohlcv:
         volume_history = await get_volume_history(ticker, limit=20)
 
         for sig_type, val in _compute_returns(ohlcv["close"], close_history):
@@ -472,16 +349,19 @@ async def _run_market(ticker: str, client: httpx.AsyncClient) -> None:
 async def fetch_market_signals(
     ticker: str,
     client: httpx.AsyncClient | None = None,
+    ohlcv_batch: dict | None = None,
 ) -> None:
     """
     Fetch all Layer 03 market signals for `ticker` and write to raw_signals
     with upload_type='live'.
 
-    If `client` is None a new AsyncClient is created internally, making this
-    function callable standalone (e.g. in tests or one-off scripts).
-    Pass a shared client from the orchestrator for efficiency.
+    Parameters
+    ----------
+    client      : Shared httpx.AsyncClient.  If None a temporary one is created.
+    ohlcv_batch : Pre-fetched OHLCV dict from yfinance batch download
+                  (scheduler passes this in for efficiency).
     """
     if client is None:
         async with httpx.AsyncClient(timeout=30) as _client:
-            return await _run_market(ticker, _client)
-    return await _run_market(ticker, client)
+            return await _run_market(ticker, _client, ohlcv_batch)
+    return await _run_market(ticker, client, ohlcv_batch)

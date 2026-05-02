@@ -80,7 +80,8 @@ async def get_close_history(
     limit: int = 25,
 ) -> list[tuple[datetime, float]]:
     """
-    Return the most recent `limit` ohlcv_close rows sorted ascending.
+    Return the most recent `limit` close-price rows sorted ascending.
+    Accepts both legacy ohlcv_close (backfill/Polygon) and yf_close (yfinance).
     Includes both manual_backfill and live rows so returns can be computed
     against the most recent available close.
     """
@@ -91,7 +92,7 @@ async def get_close_history(
             SELECT timestamp, value
             FROM raw_signals
             WHERE ticker      = $1
-              AND signal_type = 'ohlcv_close'
+              AND signal_type IN ('ohlcv_close', 'yf_close')
             ORDER BY timestamp DESC
             LIMIT $2
             """,
@@ -106,7 +107,8 @@ async def get_volume_history(
     limit: int = 25,
 ) -> list[float]:
     """
-    Return the most recent `limit` ohlcv_volume values sorted ascending.
+    Return the most recent `limit` volume values sorted ascending.
+    Accepts both legacy ohlcv_volume (backfill/Polygon) and yf_volume (yfinance).
     Used for computing volume_ratio = current_vol / avg_vol.
     """
     pool = await get_pool()
@@ -116,7 +118,7 @@ async def get_volume_history(
             SELECT value
             FROM raw_signals
             WHERE ticker      = $1
-              AND signal_type = 'ohlcv_volume'
+              AND signal_type IN ('ohlcv_volume', 'yf_volume')
             ORDER BY timestamp DESC
             LIMIT $2
             """,
@@ -141,5 +143,52 @@ async def get_latest_signal(ticker: str, signal_type: str) -> float | None:
             """,
             ticker,
             signal_type,
+        )
+    return float(val) if val is not None else None
+
+
+async def get_signal_history(
+    ticker: str,
+    signal_type: str,
+    limit: int = 20,
+) -> list[float]:
+    """
+    Return the most recent `limit` values for a given signal_type, oldest first.
+
+    Used for rolling z-score normalizers (e.g. short_volume_ratio_otc) that
+    need a lookback window of historical daily values.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT value
+            FROM raw_signals
+            WHERE ticker      = $1
+              AND signal_type = $2
+            ORDER BY timestamp DESC
+            LIMIT $3
+            """,
+            ticker,
+            signal_type,
+            limit,
+        )
+    return [float(r["value"]) for r in reversed(rows)]
+
+
+async def get_latest_close(ticker: str) -> float | None:
+    """Return the most recent close price (yf_close or ohlcv_close), or None."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            """
+            SELECT value
+            FROM raw_signals
+            WHERE ticker      = $1
+              AND signal_type IN ('yf_close', 'ohlcv_close')
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            ticker,
         )
     return float(val) if val is not None else None

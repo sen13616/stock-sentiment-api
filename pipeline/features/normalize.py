@@ -38,6 +38,8 @@ _SOURCE_WEIGHTS: dict[str, float] = {
     "finnhub":       0.8,
     "computed":      0.85,
     "newsapi":       0.7,
+    "yfinance":      0.9,
+    "finra_regsho":  0.9,
 }
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,26 @@ def _score_implied_vol(iv: float) -> float:
     return max(0.0, min(100.0, 50.0 - (iv - 0.35) / 0.15 * 25.0))
 
 
+def _score_order_flow_imbalance(clv: float) -> float:
+    """CLV (close location value) in [-1, 1]. Positive = close near high = bullish."""
+    return max(0.0, min(100.0, 50.0 + 50.0 * clv))
+
+
+def _score_buy_pressure(x: float) -> float:
+    """Buy fraction in [0, 1]. 0.5 = neutral, 1.0 = bullish."""
+    return max(0.0, min(100.0, 100.0 * x))
+
+
+def _score_sell_pressure(x: float) -> float:
+    """Sell fraction in [0, 1]. Inverted: 0.5 = neutral, 1.0 = bearish → score 0."""
+    return max(0.0, min(100.0, 100.0 * (1.0 - x)))
+
+
+def _score_bid_ask_spread_bps(bps: float) -> float:
+    """Bid-ask spread in basis points. 10 bps neutral; wider = bearish (illiquidity)."""
+    return max(0.0, min(100.0, 50.0 - 50.0 * math.tanh((bps - 10.0) / 30.0)))
+
+
 def _score_insider_shares(shares: float) -> float:
     """Net insider shares bought (positive) / sold (negative)."""
     return max(0.0, min(100.0, 50.0 + 50.0 * math.tanh(shares / 100_000.0)))
@@ -127,6 +149,10 @@ _SIMPLE_SCORERS: dict[str, object] = {
     "put_call_ratio":       _score_put_call,
     "short_interest_ratio": _score_short_interest,
     "implied_volatility":   _score_implied_vol,
+    "order_flow_imbalance": _score_order_flow_imbalance,
+    "buy_pressure":         _score_buy_pressure,
+    "sell_pressure":        _score_sell_pressure,
+    "bid_ask_spread_bps":   _score_bid_ask_spread_bps,
     "insider_net_shares":   _score_insider_shares,
     "analyst_buy_pct":      _score_analyst_buy_pct,
     "vix":                  _score_vix,
@@ -294,3 +320,79 @@ def score_macro_signals(
             "macro", "_MACRO_", now,
         ))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Short volume ratio — per-ticker rolling z-score normalizer
+# ---------------------------------------------------------------------------
+
+def _normalize_short_volume_z(
+    history: list[float],
+    today_value: float,
+) -> float | None:
+    """
+    Compute a normalized score for short_volume_ratio_otc via rolling z-score.
+
+    Parameters
+    ----------
+    history     : Recent daily short_volume_ratio_otc values (oldest first).
+                  Typically 20 trading days.
+    today_value : Today's short_volume_ratio_otc value to score.
+
+    Returns
+    -------
+    float in [-1, 1] or None if insufficient data / zero variance.
+
+    Sign convention: high recent short volume = bearish positioning,
+    so the output is NEGATED (z = +3 → -1, z = -3 → +1).
+    """
+    if len(history) < 10:
+        return None
+
+    n = len(history)
+    mean = sum(history) / n
+    variance = sum((x - mean) ** 2 for x in history) / n
+    std = variance ** 0.5
+
+    if std < 1e-12:
+        return None
+
+    z = (today_value - mean) / std
+    z = max(-3.0, min(3.0, z))
+    return -(z / 3.0)
+
+
+async def score_short_volume_ratio(
+    ticker: str,
+    raw_row: dict,
+    now: datetime,
+) -> dict | None:
+    """
+    Normalize a short_volume_ratio_otc signal via per-ticker rolling z-score.
+
+    Fetches 20-day history from the DB, computes the z-score, and returns
+    a fully scored signal dict — or None if history is insufficient.
+
+    This is async because it requires a DB read for the lookback window.
+    It is called separately from score_market_signals() (which is sync).
+    """
+    from db.queries.raw_signals import get_signal_history
+
+    history = await get_signal_history(ticker, "short_volume_ratio_otc", limit=20)
+    today_value = float(raw_row["value"])
+
+    normalized = _normalize_short_volume_z(history, today_value)
+    if normalized is None:
+        return None
+
+    score = 50.0 + 50.0 * normalized
+    return _build(
+        "short_volume_ratio_otc",
+        today_value,
+        score,
+        raw_row.get("source", "finra_regsho"),
+        raw_row["timestamp"],
+        "market",
+        ticker,
+        now,
+    )

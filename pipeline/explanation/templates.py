@@ -113,6 +113,31 @@ _PHRASES: dict[str, dict[str, str]] = {
         "bearish": "negative sector momentum",
         "neutral": "flat sector trend",
     },
+    "Order flow": {
+        "bullish": "buy-side order flow imbalance",
+        "bearish": "sell-side order flow imbalance",
+        "neutral": "balanced order flow",
+    },
+    "Buy pressure": {
+        "bullish": "elevated buy pressure",
+        "bearish": "weak buy pressure",
+        "neutral": "neutral buy pressure",
+    },
+    "Sell pressure": {
+        "bullish": "receding sell pressure",
+        "bearish": "elevated sell pressure",
+        "neutral": "neutral sell pressure",
+    },
+    "Bid-ask spread": {
+        "bullish": "tight bid-ask spreads (strong liquidity)",
+        "bearish": "wide bid-ask spreads (thin liquidity)",
+        "neutral": "normal bid-ask spreads",
+    },
+    "Short volume ratio": {
+        "bullish": "declining short volume activity",
+        "bearish": "elevated short volume pressure",
+        "neutral": "normal short volume levels",
+    },
 }
 
 _DEFAULT_PHRASE: dict[str, str] = {

@@ -55,6 +55,11 @@ EDGAR_DELAY = 0.5
 POLYGON_SEM   = asyncio.Semaphore(1)
 POLYGON_DELAY = 0.85
 
+#: yfinance Ticker.info: no hard rate limit, but each call is a blocking
+#: HTTP round-trip.  Cap at 10 concurrent to avoid overwhelming yfinance
+#: servers or the event loop's thread pool.
+YF_INFO_SEM = asyncio.Semaphore(10)
+
 # Auth-failure status codes: do not consume the provider's rate-limit quota.
 _AUTH_FAIL_CODES: frozenset[int] = frozenset((403, 404))
 _BRIEF_DELAY: float = 0.05     # courtesy pause for auth failures

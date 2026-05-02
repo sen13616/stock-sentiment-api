@@ -45,6 +45,8 @@ _SIGNAL_LABELS: dict[str, str] = {
     "rsi_14":                "RSI(14)",
     "ohlcv_close":           "Price",
     "ohlcv_volume":          "Volume",
+    "yf_close":              "Price",
+    "yf_volume":             "Volume",
     "return_1d":             "Price momentum (1d)",
     "return_5d":             "Price momentum (5d)",
     "return_20d":            "Price momentum (20d)",
@@ -58,6 +60,14 @@ _SIGNAL_LABELS: dict[str, str] = {
     "vix":                   "VIX",
     "sector_etf_close":      "Sector ETF",
     "sector_etf_return_20d": "Sector trend (20d)",
+    "order_flow_imbalance":  "Order flow",
+    "buy_pressure":          "Buy pressure",
+    "sell_pressure":         "Sell pressure",
+    "bid_ask_spread_bps":    "Bid-ask spread",
+    "bid_ask_spread":        "Bid-ask spread (raw)",
+    "bid":                   "Bid price",
+    "ask":                   "Ask price",
+    "short_volume_ratio_otc": "Short volume ratio",
 }
 
 
@@ -111,6 +121,24 @@ def _describe(signal_type: str, value: float, ticker: str = "") -> str:
 
     if signal_type == "sector_etf_return_20d":
         return f"Sector 20-day return: {value:+.2%}"
+
+    if signal_type == "order_flow_imbalance":
+        side = "buy-side" if value > 0 else "sell-side" if value < 0 else "balanced"
+        return f"Order flow imbalance{t}: {value:+.2f} CLV ({side})"
+
+    if signal_type == "buy_pressure":
+        return f"Buy pressure{t}: {value:.2f} ({value * 100:.1f}%)"
+
+    if signal_type == "sell_pressure":
+        return f"Sell pressure{t}: {value:.2f} ({value * 100:.1f}%)"
+
+    if signal_type == "bid_ask_spread_bps":
+        width = "tight" if value < 10 else "wide" if value > 50 else "moderate"
+        return f"Bid-ask spread{t}: {value:.1f} bps ({width})"
+
+    if signal_type == "short_volume_ratio_otc":
+        level = "elevated" if value > 0.55 else "low" if value < 0.35 else "normal"
+        return f"Short volume ratio (OTC){t}: {value:.1%} ({level})"
 
     # Generic fallback
     return f"{_label(signal_type)}{t}: {value:.4g}"
