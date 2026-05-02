@@ -15,6 +15,7 @@ Public API
     export_raw_signals()        — option 4: raw signals (30 d) + pivot summary
     export_articles()           — option 5: raw_articles, all rows
     export_top_bottom_scores()  — option 6: top/bottom 50 + full ranked list
+    export_sentiment_snapshot() — option 7: current scores for entire universe
     show_export_menu(...)       — interactive sub-menu (for db_viewer.py)
 """
 from __future__ import annotations
@@ -431,6 +432,85 @@ async def export_top_bottom_scores() -> tuple[tuple, tuple, tuple]:
 
 
 # ---------------------------------------------------------------------------
+# Option 7 — sentiment snapshot (one row per ticker, latest score)
+# ---------------------------------------------------------------------------
+
+async def export_sentiment_snapshot() -> tuple[str, int]:
+    """
+    Export a point-in-time snapshot: one row per ticker with the most recent
+    sentiment score, sub-indices, confidence, and company name.
+
+    Returns (filepath, n_rows).
+    """
+    db = await _conn()
+    try:
+        rows = await db.fetch(
+            """
+            SELECT DISTINCT ON (sh.ticker)
+                sh.ticker,
+                tu.company_name,
+                sh.composite_score,
+                sh.market_index,
+                sh.narrative_index,
+                sh.influencer_index,
+                sh.macro_index,
+                sh.confidence_score,
+                sh.confidence_flags,
+                sh.top_drivers,
+                sh.divergence,
+                sh.market_as_of,
+                sh.narrative_as_of,
+                sh.influencer_as_of,
+                sh.macro_as_of,
+                sh.timestamp
+            FROM sentiment_history sh
+            LEFT JOIN ticker_universe tu ON tu.ticker = sh.ticker
+            ORDER BY sh.ticker, sh.timestamp DESC
+            """
+        )
+    finally:
+        await db.close()
+
+    now    = datetime.now(timezone.utc)
+    output = []
+    for r in rows:
+        score  = r["composite_score"]
+        layers = [r["market_index"], r["narrative_index"],
+                  r["influencer_index"], r["macro_index"]]
+        ts = r["timestamp"]
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        output.append({
+            "ticker":           r["ticker"],
+            "company_name":     r["company_name"],
+            "composite_score":  score,
+            "label":            _score_to_label(score),
+            "market_index":     r["market_index"],
+            "narrative_index":  r["narrative_index"],
+            "influencer_index": r["influencer_index"],
+            "macro_index":      r["macro_index"],
+            "layers_present":   sum(1 for x in layers if x is not None),
+            "confidence_score": r["confidence_score"],
+            "confidence_flags": r["confidence_flags"],
+            "divergence":       r["divergence"],
+            "top_drivers":      r["top_drivers"],
+            "market_as_of":     r["market_as_of"],
+            "narrative_as_of":  r["narrative_as_of"],
+            "influencer_as_of": r["influencer_as_of"],
+            "macro_as_of":      r["macro_as_of"],
+            "timestamp":        r["timestamp"],
+            "minutes_ago":      int((now - ts).total_seconds() / 60) if ts else None,
+        })
+
+    # Sort by composite score descending (most bullish first)
+    output.sort(key=lambda r: r["composite_score"] or 0, reverse=True)
+
+    filepath = os.path.join(EXPORTS_DIR, f"sentiment_snapshot_{_ts()}.csv")
+    n = _write_csv(filepath, output)
+    return filepath, n
+
+
+# ---------------------------------------------------------------------------
 # Interactive export sub-menu (called from db_viewer.py)
 # ---------------------------------------------------------------------------
 
@@ -463,7 +543,8 @@ async def show_export_menu(
         "  [cyan]4[/cyan]  Raw signals — last 30 days + pivot summary\n"
         "  [cyan]5[/cyan]  Articles — all rows\n"
         "  [cyan]6[/cyan]  Top / bottom 50 scores today\n"
-        "  [cyan]7[/cyan]  Cancel",
+        "  [cyan]7[/cyan]  Sentiment snapshot (current scores, entire universe)\n"
+        "  [cyan]8[/cyan]  Cancel",
         title="[bold yellow]Export[/bold yellow]",
         expand=False,
     ))
@@ -515,4 +596,9 @@ async def show_export_menu(
         console.print(f"  [bold green]Bot 50:  {nb} rows →[/bold green] [cyan]{bp}[/cyan]")
         console.print(f"  [bold green]Ranked:  {nr} rows →[/bold green] [cyan]{rp}[/cyan]")
 
-    # key == "7" or anything else → silent cancel
+    elif key == "7":
+        console.print("  [dim]Exporting sentiment snapshot…[/dim]")
+        path, n = await export_sentiment_snapshot()
+        console.print(f"  [bold green]Exported {n:,} tickers →[/bold green] [cyan]{path}[/cyan]")
+
+    # key == "8" or anything else → silent cancel
