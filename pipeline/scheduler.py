@@ -109,13 +109,17 @@ async def _fetch_all_tickers(
     pbar.close()
 
 
+_SCORE_SEM = asyncio.Semaphore(10)  # bound concurrent DB connections (asyncpg default pool=10)
+
+
 async def _score_all(
     tickers: list[str],
     job_name: str,
     layers: set[str] | None = None,
 ) -> tuple[int, int]:
     """
-    Score all tickers sequentially to avoid overwhelming the DB.
+    Score all tickers concurrently, bounded by _SCORE_SEM to stay within
+    the asyncpg connection pool limit.
 
     Parameters
     ----------
@@ -129,15 +133,18 @@ async def _score_all(
     fetched = 0
     total_layers = 0
 
-    with _tqdm(
+    pbar = _tqdm(
         total=len(tickers),
         desc=desc,
         unit="tkr",
         file=sys.stderr,
         dynamic_ncols=True,
         bar_format=_BAR_FMT,
-    ) as pbar:
-        for ticker in tickers:
+    )
+
+    async def _bounded(ticker: str) -> None:
+        nonlocal fetched, total_layers
+        async with _SCORE_SEM:
             try:
                 n_layers = await _score_and_write(ticker, layers=layers)
                 fetched += 1
@@ -146,9 +153,13 @@ async def _score_all(
                 _log.error(
                     "%s: scoring failed for %s: %s", job_name, ticker, exc, exc_info=True
                 )
-            pbar.update(1)
-            avg = total_layers / fetched if fetched else 0
-            pbar.set_postfix_str(f"{ticker} | ✓ {fetched} avg={avg:.1f}/4", refresh=True)
+            finally:
+                pbar.update(1)
+                avg = total_layers / fetched if fetched else 0
+                pbar.set_postfix_str(f"✓ {fetched} avg={avg:.1f}/4", refresh=True)
+
+    await asyncio.gather(*[_bounded(t) for t in tickers])
+    pbar.close()
 
     return fetched, total_layers
 
