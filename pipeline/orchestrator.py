@@ -38,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from db.queries.raw_articles import get_articles_since
-from db.queries.raw_signals import get_latest_close, get_latest_signal, get_signals_since
+from db.queries.raw_signals import get_latest_close, get_latest_signal, get_signals_since, get_signals_since_batch
 from pipeline.confidence.scorer import compute_confidence
 from pipeline.confidence.staleness import (
     _market_stale,
@@ -302,12 +302,10 @@ async def _score_macro(
     last_state: dict | None,
 ) -> tuple[SubIndexResult | None, list[dict], datetime | None]:
     since  = now - _LAYER_LOOKBACK["macro"]
-    # Collect VIX + all sector ETF 20d returns
+    # Collect VIX + all sector ETF 20d returns in two queries (was 12)
     vix_rows = await get_signals_since(_MACRO_TICKER, since, ["vix"])
-    etf_rows: list[dict] = []
-    for etf in _SECTOR_ETFS:
-        rows = await get_signals_since(etf, since, ["sector_etf_return_20d"])
-        etf_rows.extend(rows)
+    etf_batch = await get_signals_since_batch(_SECTOR_ETFS, since, ["sector_etf_return_20d"])
+    etf_rows: list[dict] = [r for rows in etf_batch.values() for r in rows]
 
     all_raw = vix_rows + etf_rows
     if all_raw:
