@@ -6,8 +6,9 @@ Fetches live market signals for a single ticker and writes them to raw_signals.
 Signals produced
 ----------------
 yf_open / yf_high / yf_low / yf_close / yf_volume
-  Primary:  yfinance batch download (called once in scheduler, passed in)
-  Fallback: Polygon /v2/aggs/ticker/{ticker}/prev  (ohlcv_* signal types)
+  Source:   yfinance batch download (called once in scheduler, passed in)
+  Note:     Polygon /prev is NOT used as live fallback (returns yesterday's
+            bar which would poison return/order-flow calculations)
 
 bid_ask_spread / bid_ask_spread_bps / bid / ask
   Fetched: yfinance Ticker.info (market hours only)
@@ -281,10 +282,12 @@ async def _run_market(
     now = datetime.now(timezone.utc)
     rows: list[tuple] = []
 
-    # --- OHLCV (primary: yfinance batch, fallback: Polygon) ---
+    # --- OHLCV (yfinance batch only in live cycle) ---
+    # Polygon /prev is NOT used as a live fallback because it returns
+    # yesterday's bar, which downstream treats as today's — poisoning
+    # return calculations and order flow.  _ohlcv_polygon remains
+    # defined for backfill scripts that legitimately want prior-day data.
     ohlcv = (ohlcv_batch or {}).get(ticker)
-    if ohlcv is None:
-        ohlcv = await _ohlcv_polygon(ticker, client)
 
     if ohlcv:
         src = ohlcv["source"]
