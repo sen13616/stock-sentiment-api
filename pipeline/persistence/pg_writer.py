@@ -46,6 +46,14 @@ from db.queries import price_snapshots as ps_queries
 from db.queries import sentiment_history as sh_queries
 
 
+def _first_not_none(*vals):
+    """Return the first value that is not None, or None if all are None."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _sub_value(sub_indices: dict | None, layer: str) -> float | None:
     """Extract the numeric sub-index value for `layer` from a sub_indices dict."""
     if not sub_indices:
@@ -97,14 +105,14 @@ async def persist_scored_state(state: dict) -> None:
 
     # ── sub-indices: flat keys take priority, nested sub_indices as fallback ───
     sub_indices = state.get("sub_indices") or {}
-    market_index     = state.get("market_index")     or _sub_value(sub_indices, "market")
-    narrative_index  = state.get("narrative_index")  or _sub_value(sub_indices, "narrative")
-    influencer_index = state.get("influencer_index") or _sub_value(sub_indices, "influencer")
-    macro_index      = state.get("macro_index")      or _sub_value(sub_indices, "macro")
+    market_index     = _first_not_none(state.get("market_index"),     _sub_value(sub_indices, "market"))
+    narrative_index  = _first_not_none(state.get("narrative_index"),  _sub_value(sub_indices, "narrative"))
+    influencer_index = _first_not_none(state.get("influencer_index"), _sub_value(sub_indices, "influencer"))
+    macro_index      = _first_not_none(state.get("macro_index"),      _sub_value(sub_indices, "macro"))
 
     # ── confidence: flat keys take priority, nested confidence dict as fallback ─
     confidence       = state.get("confidence") or {}
-    conf_score: int  = int(state.get("confidence_score") or confidence.get("score") or 0)
+    conf_score: int  = int(_first_not_none(state.get("confidence_score"), confidence.get("score"), 0))
     conf_flags       = list(state.get("confidence_flags") or confidence.get("flags") or [])
 
     # ── freshness timestamps: flat keys take priority, nested freshness as fallback
@@ -120,8 +128,8 @@ async def persist_scored_state(state: dict) -> None:
 
     # ── price snapshot: flat keys take priority, nested price dict as fallback ─
     price_info  = state.get("price") or {}
-    close       = state.get("close_price") or price_info.get("close")
-    volume_raw  = state.get("volume")      or price_info.get("volume")
+    close       = _first_not_none(state.get("close_price"), price_info.get("close"))
+    volume_raw  = _first_not_none(state.get("volume"),      price_info.get("volume"))
 
     pool = await get_pool()
     async with pool.acquire() as conn:
