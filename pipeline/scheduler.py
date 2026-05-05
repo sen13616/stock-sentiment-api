@@ -5,7 +5,7 @@ APScheduler configuration for the background scoring pipeline (System A).
 
 Jobs registered:
 
-    market_job       — weekdays 9 am–4 pm UTC, every 15 minutes
+    market_job       — weekdays 14:30–21:00 UTC, every 15 minutes
     narrative_job    — every 30 minutes (24 × 7)
     influencer_job   — every 6 hours
     macro_job        — daily at 02:00 UTC
@@ -239,7 +239,7 @@ async def _yf_batch_download(tickers: list[str]) -> dict[str, dict]:
 
 async def market_job() -> None:
     """
-    Market layer job — weekdays 9 am–4 pm, every 15 minutes.
+    Market layer job — weekdays 14:30–21:00 UTC, every 15 minutes.
 
     Batch-downloads OHLCV for all tickers via yfinance in one call, then
     fetches RSI and derived signals per-ticker in parallel, and finally
@@ -448,9 +448,9 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 
 scheduler.add_job(
     market_job,
-    trigger=CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/15"),
+    trigger=CronTrigger(day_of_week="mon-fri", hour="14-20", minute="*/15"),
     id="market",
-    name="Market data (15 min, market hours)",
+    name="Market data (15 min, 14:30-21:00 UTC)",
     max_instances=1,
     coalesce=True,
     misfire_grace_time=60,
