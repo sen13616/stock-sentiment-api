@@ -30,11 +30,11 @@ async def get_active_tickers() -> list[str]:
 
 
 async def is_supported_ticker(ticker: str) -> bool:
-    """Return True if ticker is in the active universe (any tier)."""
+    """Return True if ticker is in the tier1_supported universe."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT 1 FROM ticker_universe WHERE ticker = $1",
+            "SELECT 1 FROM ticker_universe WHERE ticker = $1 AND tier = 'tier1_supported'",
             ticker.upper(),
         )
     return row is not None
