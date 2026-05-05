@@ -403,7 +403,15 @@ async def _score_and_write(
     stale_list  = stale_sources(as_of_map, now=now)
 
     all_sigs    = market_sigs + narrative_sigs + influencer_sigs + macro_sigs
-    n_signals   = sum(1 for s in all_sigs if (s.get("weight") or 0) > 0)
+    # Count signals from freshly scored layers (sigs list) plus carried-forward
+    # layers (n_signals stored in SubIndexResult). Without this, per-layer jobs
+    # would undercount and trigger a -20 low_signal_volume penalty incorrectly.
+    n_fresh     = sum(1 for s in all_sigs if (s.get("weight") or 0) > 0)
+    n_carried   = sum(
+        si.n_signals for layer, si in sub_indices.items()
+        if si is not None and layers is not None and layer not in layers
+    )
+    n_signals   = n_fresh + n_carried
 
     conf_result = compute_confidence(
         missing_layers  = composite_result.missing_layers,
