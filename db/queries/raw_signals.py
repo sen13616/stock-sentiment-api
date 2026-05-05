@@ -89,11 +89,12 @@ async def get_close_history(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT timestamp, value
+            SELECT DISTINCT ON (DATE(timestamp))
+                   timestamp, value
             FROM raw_signals
             WHERE ticker      = $1
               AND signal_type IN ('ohlcv_close', 'yf_close')
-            ORDER BY timestamp DESC
+            ORDER BY DATE(timestamp) DESC, timestamp DESC
             LIMIT $2
             """,
             ticker,
