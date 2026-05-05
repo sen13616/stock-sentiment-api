@@ -70,8 +70,8 @@ SECTOR_ETFS: dict[str, str] = {
 # VIX helpers
 # ---------------------------------------------------------------------------
 
-async def _vix_finnhub(client: httpx.AsyncClient) -> float | None:
-    """Finnhub /quote?symbol=^VIX → current VIX level."""
+async def _vix_finnhub(client: httpx.AsyncClient) -> tuple[float, str] | None:
+    """Finnhub /quote?symbol=^VIX → (vix_value, source) or None."""
     resp = await guarded_get(
         client, f"{_FINNHUB_BASE}/quote",
         params={"symbol": "^VIX", "token": _FINNHUB_KEY},
@@ -82,14 +82,14 @@ async def _vix_finnhub(client: httpx.AsyncClient) -> float | None:
     try:
         body = resp.json()
         price = body.get("c")  # current price
-        return float(price) if price else None
+        return (float(price), "finnhub") if price else None
     except Exception as exc:
         _log.warning("Finnhub VIX parse error: %s", exc)
         return None
 
 
-async def _vix_av(client: httpx.AsyncClient) -> float | None:
-    """Alpha Vantage GLOBAL_QUOTE?symbol=^VIX fallback."""
+async def _vix_av(client: httpx.AsyncClient) -> tuple[float, str] | None:
+    """Alpha Vantage GLOBAL_QUOTE?symbol=^VIX fallback → (vix_value, source) or None."""
     resp = await guarded_get(
         client, _AV_BASE,
         params={
@@ -117,7 +117,7 @@ async def _vix_av(client: httpx.AsyncClient) -> float | None:
         return None
 
     try:
-        return float(price)
+        return (float(price), "alpha_vantage")
     except ValueError:
         return None
 
@@ -195,12 +195,12 @@ async def _run_macro(client: httpx.AsyncClient) -> None:
     rows: list[tuple] = []
 
     # --- VIX (primary: Finnhub, fallback: AV) ---
-    vix = await _vix_finnhub(client)
-    if vix is None:
-        vix = await _vix_av(client)
+    result = await _vix_finnhub(client)
+    if result is None:
+        result = await _vix_av(client)
 
-    if vix is not None:
-        src = "finnhub" if vix is not None else "alpha_vantage"
+    if result is not None:
+        vix, src = result
         rows.append(("_MACRO_", "vix", vix, src, "live", now))
         _log.info("VIX = %.2f", vix)
 
@@ -218,7 +218,7 @@ async def _run_macro(client: httpx.AsyncClient) -> None:
         ret_20d = _compute_etf_return_20d(etf_close, close_history)
         if ret_20d is not None:
             rows.append((etf, "sector_etf_return_20d", ret_20d, "computed", "live", now))
-            _log.info("%s: close=%.2f  20d_return=%+.2%%", etf, etf_close, ret_20d)
+            _log.info("%s: close=%.2f  20d_return=%+.4f", etf, etf_close, ret_20d)
         else:
             _log.info("%s: close=%.2f  (insufficient history for 20d return)", etf, etf_close)
 
