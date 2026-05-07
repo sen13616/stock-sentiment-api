@@ -1,11 +1,13 @@
 """
 tests/test_scheduler_config.py — Verify scheduler cron triggers fire within
-the correct UTC windows.
+the correct UTC windows, and that the scoring tick job is correctly configured.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from apscheduler.triggers.cron import CronTrigger
 
 
@@ -47,3 +49,60 @@ def test_market_job_last_fire_is_2045_utc():
     # Should be next day (Tuesday) at 14:00
     assert nxt.day == 5
     assert nxt.hour == 14
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3 — scoring tick tests
+# ---------------------------------------------------------------------------
+
+
+def test_scoring_tick_job_registered():
+    """scoring_tick job must be registered with 30-minute interval."""
+    from pipeline.scheduler import scheduler
+
+    job = scheduler.get_job("scoring_tick")
+    assert job is not None, "scoring_tick job not found in scheduler"
+    # IntervalTrigger stores interval as a timedelta
+    assert job.trigger.interval.total_seconds() == 30 * 60
+
+
+async def test_scoring_tick_calls_score_all_for_active_tickers():
+    """scoring_tick_job must call _score_all with the full ticker list."""
+    mock_tickers = ["AAPL", "MSFT", "GOOGL"]
+
+    with (
+        patch("pipeline.scheduler.get_active_tickers", new_callable=AsyncMock, return_value=mock_tickers),
+        patch("pipeline.scheduler._score_all", new_callable=AsyncMock, return_value=(3, 12)) as mock_score_all,
+        patch("pipeline.scheduler._record_run", new_callable=AsyncMock),
+    ):
+        from pipeline.scheduler import scoring_tick_job
+        await scoring_tick_job()
+
+    mock_score_all.assert_called_once_with(mock_tickers, "SCORING_TICK")
+
+
+async def test_score_and_write_recomputes_all_four_layers():
+    """_score_and_write must call all 4 layer scorers — none skipped."""
+    now = datetime.now(timezone.utc)
+    from pipeline.scoring.subindices import SubIndexResult
+
+    si = SubIndexResult(50.0, 1, ["test"])
+
+    with (
+        patch("pipeline.orchestrator.read_scored_state", new_callable=AsyncMock, return_value=None),
+        patch("pipeline.orchestrator.get_latest_close", new_callable=AsyncMock, return_value=100.0),
+        patch("pipeline.orchestrator._score_market", new_callable=AsyncMock, return_value=(si, [], now)) as mock_market,
+        patch("pipeline.orchestrator._score_narrative", new_callable=AsyncMock, return_value=(si, [], now)) as mock_narrative,
+        patch("pipeline.orchestrator._score_influencer", new_callable=AsyncMock, return_value=(si, [], now, now, now)) as mock_influencer,
+        patch("pipeline.orchestrator._score_macro", new_callable=AsyncMock, return_value=(si, [], now)) as mock_macro,
+        patch("pipeline.orchestrator.compute_confidence", return_value=__import__("pipeline.confidence.scorer", fromlist=["ConfidenceResult"]).ConfidenceResult(score=80, flags=[])),
+        patch("pipeline.orchestrator.write_scored_state", new_callable=AsyncMock),
+        patch("pipeline.orchestrator.persist_scored_state", new_callable=AsyncMock),
+    ):
+        from pipeline.orchestrator import _score_and_write
+        await _score_and_write("AAPL")
+
+    mock_market.assert_called_once()
+    mock_narrative.assert_called_once()
+    mock_influencer.assert_called_once()
+    mock_macro.assert_called_once()

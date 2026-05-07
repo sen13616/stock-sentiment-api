@@ -158,4 +158,5 @@ class StatusResponse(BaseModel):
     last_narrative_run:   Optional[datetime] = None
     last_influencer_run:  Optional[datetime] = None
     last_macro_run:       Optional[datetime] = None
-    last_eod_run:         Optional[datetime] = None
+    last_eod_run:           Optional[datetime] = None
+    last_scoring_tick_run:  Optional[datetime] = None
