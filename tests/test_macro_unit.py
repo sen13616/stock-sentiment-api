@@ -44,7 +44,7 @@ async def test_vix_finnhub_success_returns_tuple():
 # ---------------------------------------------------------------------------
 
 async def test_vix_av_fallback_returns_alpha_vantage_source():
-    """When Finnhub fails and AV succeeds, VIX row source is 'alpha_vantage'."""
+    """When yfinance and Finnhub fail and AV succeeds, VIX row source is 'alpha_vantage'."""
     from pipeline.sources.macro import _run_macro
 
     mock_av_resp = AsyncMock(spec=httpx.Response)
@@ -53,11 +53,7 @@ async def test_vix_av_fallback_returns_alpha_vantage_source():
         "Global Quote": {"05. price": "22.10"},
     }
 
-    call_count = 0
-
     async def fake_guarded_get(client, url, *, params=None, sem=None, delay=None, label=""):
-        nonlocal call_count
-        call_count += 1
         if "finnhub" in url:
             return None  # Finnhub fails
         return mock_av_resp  # AV succeeds
@@ -65,6 +61,7 @@ async def test_vix_av_fallback_returns_alpha_vantage_source():
     client = AsyncMock(spec=httpx.AsyncClient)
 
     with (
+        patch("pipeline.sources.macro._vix_yfinance", new_callable=AsyncMock, return_value=None),
         patch("pipeline.sources.macro.guarded_get", side_effect=fake_guarded_get),
         patch("pipeline.sources.macro.insert_signals", new_callable=AsyncMock) as mock_insert,
         patch("pipeline.sources.macro.get_close_history", new_callable=AsyncMock, return_value=[]),
@@ -83,13 +80,14 @@ async def test_vix_av_fallback_returns_alpha_vantage_source():
 # 3. Both fail → no VIX row
 # ---------------------------------------------------------------------------
 
-async def test_vix_both_fail_no_row():
-    """When both Finnhub and AV fail, no VIX row is produced."""
+async def test_vix_all_fail_no_row():
+    """When yfinance, Finnhub, and AV all fail, no VIX row is produced."""
     from pipeline.sources.macro import _run_macro
 
     client = AsyncMock(spec=httpx.AsyncClient)
 
     with (
+        patch("pipeline.sources.macro._vix_yfinance", new_callable=AsyncMock, return_value=None),
         patch("pipeline.sources.macro.guarded_get", return_value=None),
         patch("pipeline.sources.macro.insert_signals", new_callable=AsyncMock) as mock_insert,
         patch("pipeline.sources.macro.SECTOR_ETFS", {}),

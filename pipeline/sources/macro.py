@@ -23,11 +23,13 @@ All written with upload_type='live', source as noted.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
 
 import httpx
+import yfinance as yf
 from dotenv import load_dotenv
 
 from db.queries.raw_signals import (
@@ -69,6 +71,23 @@ SECTOR_ETFS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # VIX helpers
 # ---------------------------------------------------------------------------
+
+async def _vix_yfinance() -> tuple[float, str] | None:
+    """Fetch current VIX via yfinance (no API key required)."""
+    def _fetch():
+        ticker = yf.Ticker("^VIX")
+        hist = ticker.history(period="5d")
+        if hist.empty:
+            return None
+        return float(hist["Close"].iloc[-1])
+
+    try:
+        value = await asyncio.to_thread(_fetch)
+        return (value, "yfinance") if value is not None else None
+    except Exception as exc:
+        _log.warning("VIX yfinance fetch failed: %s", exc)
+        return None
+
 
 async def _vix_finnhub(client: httpx.AsyncClient) -> tuple[float, str] | None:
     """Finnhub /quote?symbol=^VIX → (vix_value, source) or None."""
@@ -194,15 +213,19 @@ async def _run_macro(client: httpx.AsyncClient) -> None:
     now  = datetime.now(timezone.utc)
     rows: list[tuple] = []
 
-    # --- VIX (primary: Finnhub, fallback: AV) ---
-    result = await _vix_finnhub(client)
+    # --- VIX (primary: yfinance, fallback: Finnhub, fallback: AV) ---
+    result = await _vix_yfinance()
+    if result is None:
+        result = await _vix_finnhub(client)
     if result is None:
         result = await _vix_av(client)
 
     if result is not None:
         vix, src = result
         rows.append(("_MACRO_", "vix", vix, src, "live", now))
-        _log.info("VIX = %.2f", vix)
+        _log.info("VIX = %.2f (source: %s)", vix, src)
+    else:
+        _log.warning("VIX: all three sources failed")
 
     # --- Sector ETF closes and 20-day returns ---
     for sector, etf in SECTOR_ETFS.items():
