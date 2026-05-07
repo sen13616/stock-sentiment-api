@@ -11,6 +11,7 @@
 | 0 | 2026-05-07 | Claude Code | Initial draft generated from masterchecklist.md |
 | 1 | 2026-05-07 | Aayudh (review) + Claude Code (edits) | Sprint 2 reclassified Small/0.5d; Sprint 3 gets Q10–Q12; Sprint 4 audit re-runs moved to Sprint 7; Sprint 5 split into 5a/5b; Sprint 7 gains audit re-run deliverables; Sprint 17 split into 17a/17b; Open Question #9 resolved (Audit E between Sprint 7 and 17a); revision history section added |
 | 2 | 2026-05-07 | Aayudh (decisions) + Claude Code (edits) | Q5, Q6, Q8 resolved. Plan status changed from DRAFT to APPROVED. Q1, Q11, Q12 remain open but are not blockers for Sprint 1 or Sprint 2 — will be resolved before Sprint 3 begins |
+| 3 | 2026-05-07 | Aayudh (decisions) + Claude Code (edits) | Q10, Q11, Q12 resolved for Sprint 3. Q10: clean cutover (deploy with scoring tick active, accept ~30 min gap, API serves from Redis/DB during gap). Q11: remove `_carry_forward_layer()` entirely. Q12: rollback plan defined (tag pre-merge, capture baseline, post-tick verification query, revert via Railway if thresholds breached) |
 
 ---
 
@@ -70,10 +71,10 @@ This plan covers all items in the master checklist across Phases 1–4 and the m
 - **Branch:** `feature/sprint-3-scoring-tick`
 - **Phase of master checklist:** Phase 1.2
 - **Items addressed:** G-C2
-- **Decisions required before this sprint:**
-  - **Q10 (NEW):** Deploy/transition strategy — what happens between deploy and first scoring tick? Options: (a) pause old per-job scoring before deploy and accept a brief gap, (b) run old per-job scoring and new scoring tick in parallel during a transition window, (c) deploy new code with scoring tick active and let the first tick overwrite stale per-job scores.
-  - **Q11 (NEW):** `_carry_forward_layer()` — remove entirely, or repurpose as a fallback when the scoring tick fails to produce a layer? If repurposed, define the failure conditions that trigger it.
-  - **Q12 (NEW):** Rollback plan — if the first scoring tick produces anomalous data (e.g., all scores cluster at 50, or >20-point jumps vs pre-deploy baseline), what is the rollback procedure? Revert deploy? Manual DB correction? Automatic anomaly detection?
+- **Decisions required before this sprint:** None — all resolved (rev-3).
+  - **Q10 (RESOLVED):** Clean cutover. Deploy new code with scoring tick active; old per-job scoring removed in same deploy. Accept ~30 min gap before first tick. API continues serving from Redis (24h TTL) and existing `sentiment_history` during the gap.
+  - **Q11 (RESOLVED):** Remove `_carry_forward_layer()` entirely. Delete the function and its callers. Tests that specifically exercise carry-forward semantics: delete if testing behavior being removed, rewrite if testing missing-layer handling (which still exists via redistribution). Flag any unclear test cases to Aayudh during Sprint 3 execution rather than guessing.
+  - **Q12 (RESOLVED):** Rollback plan: (1) tag `main` HEAD as `v0.9-pre-scoring-tick` before merge; (2) capture pre-deploy 10-ticker baseline to `tools/exports/sprint3_baseline_pre_<timestamp>.json`; (3) post-first-tick run verification query checking row count, neutral-score concentration, score distribution shift, and `*_as_of` alignment; (4) revert via Railway redeploy of previous tag if any threshold breached.
 - **Dependencies on prior sprints:** Sprints 1–2 should be complete so math fixes are in place before architecture changes
 - **Expected files modified:**
   - `pipeline/scheduler.py` — add `scoring_tick_job` (30-min cron); remove `_score_all()` calls from `market_job`, `narrative_job`, `influencer_job`, `macro_job`; keep `_score_all()` function but invoke from new tick job only
@@ -567,9 +568,9 @@ Decisions that affect the plan's shape. Should be resolved before the sprint tha
 | 7 | Signal source expansion decisions: data sources for earnings transcripts, Reddit, Twitter, G-S19, G-S22 | Unscheduled sprints | Resolve per-source when ready; these remain unscheduled |
 | 8 | ~~Local Postgres fate: drop, sync, or rename env vars?~~ | ~~Non-blocking~~ | **RESOLVED (rev-2):** Drop it. Local Postgres has no use case (backtesting will run against production). Aayudh will handle cleanup separately (stop the service, remove the database, update .env to point only to production). Environmental work, not sprint work. |
 | 9 | ~~Audit E timing: run validation infrastructure audit before or after Phase 1?~~ | ~~Sprint 17~~ | **RESOLVED (rev-1):** Audit E runs between Sprint 7 and Sprint 17a. It is the gate to validation work. |
-| 10 | Sprint 3 deploy/transition strategy: what happens between deploy and first scoring tick? | Sprint 3 | Options: (a) pause old scoring, (b) run in parallel during transition, (c) deploy and let first tick overwrite |
-| 11 | `_carry_forward_layer()`: remove entirely or repurpose as fallback when scoring tick fails to produce a layer? | Sprint 3 | — |
-| 12 | Sprint 3 rollback plan: procedure if first scoring tick produces anomalous data | Sprint 3 | — |
+| 10 | ~~Sprint 3 deploy/transition strategy: what happens between deploy and first scoring tick?~~ | ~~Sprint 3~~ | **RESOLVED (rev-3):** Clean cutover. Deploy with scoring tick active; old per-job scoring removed in same deploy. Accept ~30 min gap. API serves from Redis (24h TTL) and existing `sentiment_history` during gap. |
+| 11 | ~~`_carry_forward_layer()`: remove entirely or repurpose as fallback?~~ | ~~Sprint 3~~ | **RESOLVED (rev-3):** Remove entirely. Delete function and callers. Tests: delete if testing removed behavior, rewrite if testing missing-layer handling (still exists via redistribution). Flag unclear cases to Aayudh during execution. |
+| 12 | ~~Sprint 3 rollback plan: procedure if first scoring tick produces anomalous data~~ | ~~Sprint 3~~ | **RESOLVED (rev-3):** (1) Tag `main` as `v0.9-pre-scoring-tick` before merge; (2) capture pre-deploy baseline; (3) post-first-tick verification query (row count, neutral-score concentration, distribution shift, `*_as_of` alignment); (4) revert via Railway redeploy of previous tag if thresholds breached. |
 
 ---
 
