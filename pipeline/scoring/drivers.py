@@ -51,9 +51,8 @@ _SIGNAL_LABELS: dict[str, str] = {
     "return_5d":             "Price momentum (5d)",
     "return_20d":            "Price momentum (20d)",
     "volume_ratio":          "Volume surge",
-    "put_call_ratio":        "Put/call ratio",
-    "short_interest_ratio":  "Short interest",
-    "implied_volatility":    "Implied volatility",
+    # Removed Stage 1 — put_call_ratio, short_interest_ratio, implied_volatility
+    # excluded from paper's implemented methodology. See docs/SIGNAL_CATALOG.md.
     "insider_net_shares":    "Insider transaction",
     "analyst_buy_pct":       "Analyst consensus",
     "analyst_target_price":  "Analyst price target",
@@ -94,16 +93,6 @@ def _describe(signal_type: str, value: float, ticker: str = "") -> str:
 
     if signal_type == "volume_ratio":
         return f"Volume{t} is {value:.1f}× the 20-day average"
-
-    if signal_type == "put_call_ratio":
-        bias = "bearish skew" if value > 1.1 else "bullish skew" if value < 0.9 else "neutral"
-        return f"Put/call ratio{t}: {value:.2f} ({bias})"
-
-    if signal_type == "short_interest_ratio":
-        return f"Short interest{t}: {value:.2f} days to cover"
-
-    if signal_type == "implied_volatility":
-        return f"Implied volatility{t}: {value:.1%}"
 
     if signal_type == "insider_net_shares":
         action = "purchased" if value > 0 else "sold"

@@ -37,7 +37,7 @@ _SOURCE_WEIGHTS: dict[str, float] = {
     "sec_edgar":     1.0,
     "finnhub":       0.8,
     "computed":      0.85,
-    "newsapi":       0.7,
+    # Removed Stage 1 — "newsapi" excluded from paper's implemented methodology. See docs/SIGNAL_CATALOG.md.
     "yfinance":      0.9,
     "finra_regsho":  0.9,
 }
@@ -81,19 +81,8 @@ def _score_volume_ratio(vr: float) -> float:
     return max(20.0, min(80.0, 50.0 + 15.0 * math.tanh(vr - 1.0)))
 
 
-def _score_put_call(pcr: float) -> float:
-    """PCR < 0.7 → 75 (bullish), 1.0 → 50 (neutral), > 1.3 → 25 (bearish)."""
-    return max(0.0, min(100.0, 50.0 + (1.0 - pcr) * 83.33))
-
-
-def _score_short_interest(sir: float) -> float:
-    """Short interest (days to cover). Low = bullish, high = bearish."""
-    return max(0.0, min(100.0, 75.0 - 5.0 * max(0.0, sir - 2.0)))
-
-
-def _score_implied_vol(iv: float) -> float:
-    """IV ratio (0–1). Low IV = bullish, high IV = bearish."""
-    return max(0.0, min(100.0, 50.0 - (iv - 0.35) / 0.15 * 25.0))
+# Removed Stage 1 — _score_put_call, _score_short_interest, _score_implied_vol
+# excluded from paper's implemented methodology. See docs/SIGNAL_CATALOG.md.
 
 
 def _score_order_flow_imbalance(clv: float) -> float:
@@ -146,9 +135,8 @@ _SIMPLE_SCORERS: dict[str, object] = {
     "return_5d":            lambda v: _score_return(v, 0.05),
     "return_20d":           lambda v: _score_return(v, 0.10),
     "volume_ratio":         _score_volume_ratio,
-    "put_call_ratio":       _score_put_call,
-    "short_interest_ratio": _score_short_interest,
-    "implied_volatility":   _score_implied_vol,
+    # Removed Stage 1 — put_call_ratio, short_interest_ratio, implied_volatility
+    # excluded from paper's implemented methodology. See docs/SIGNAL_CATALOG.md.
     "order_flow_imbalance": _score_order_flow_imbalance,
     "buy_pressure":         _score_buy_pressure,
     "sell_pressure":        _score_sell_pressure,

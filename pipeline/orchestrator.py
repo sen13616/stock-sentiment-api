@@ -105,7 +105,8 @@ _MARKET_SIGNAL_TYPES_LEGACY = [
     # Old signal types that may still exist in the DB from prior pipeline runs.
     # Included so the scoring layer can pick them up if present.
     "ohlcv_close", "ohlcv_open", "ohlcv_high", "ohlcv_low", "ohlcv_volume",
-    "put_call_ratio", "short_interest_ratio", "implied_volatility",
+    # Removed Stage 1 — put_call_ratio, short_interest_ratio, implied_volatility
+    # excluded from paper's implemented methodology. See docs/SIGNAL_CATALOG.md.
 ]
 _INFLUENCER_SIGNAL_TYPES = [
     "insider_net_shares", "analyst_buy_pct", "analyst_target_price",
