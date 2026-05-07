@@ -29,7 +29,8 @@ _JOB_KEYS = {
     "last_narrative_run":  "pipeline:last_run:narrative",
     "last_influencer_run": "pipeline:last_run:influencer",
     "last_macro_run":      "pipeline:last_run:macro",
-    "last_eod_run":        "pipeline:last_run:market_eod",
+    "last_eod_run":          "pipeline:last_run:market_eod",
+    "last_scoring_tick_run": "pipeline:last_run:scoring_tick",
 }
 
 

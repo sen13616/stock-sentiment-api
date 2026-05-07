@@ -3,29 +3,28 @@ pipeline/orchestrator.py  — Layer 02
 
 Coordinates the full scoring pipeline for a single ticker.
 
-Pipeline flow
--------------
-    1. Fetch fresh signals from external APIs  (Layers 03–06, parallel)
-    2. Read signals from DB and apply feature engineering  (Layer 07)
-    3. Compute per-layer sub-indices  (Layer 08 — subindices)
-    4. Compute composite score and divergence  (Layer 08 — composite + divergence)
-    5. Compute confidence score  (Layer 09)
-    6. Generate explanation  (Layer 10)
-    7. Persist results to Redis and PostgreSQL  (System C)
+Architecture (Sprint 3: global scoring tick)
+---------------------------------------------
+Ingestion jobs (market, narrative, influencer, macro) are data-only: they
+fetch signals from external APIs and write to the database.  Scoring is
+performed by a dedicated ``scoring_tick_job`` that runs every 30 minutes
+and calls ``_score_and_write()`` for all tickers, recomputing all four
+layers from current DB state.
+
+Pipeline flow (per ticker, per scoring tick)
+---------------------------------------------
+    1. Read signals from DB and apply feature engineering  (Layer 07)
+    2. Compute per-layer sub-indices  (Layer 08 — subindices)
+    3. Compute composite score and divergence  (Layer 08 — composite + divergence)
+    4. Compute confidence score  (Layer 09)
+    5. Generate explanation  (Layer 10)
+    6. Persist results to Redis and PostgreSQL  (System C)
 
 Fallback propagation (per spec §Layer 02)
 ------------------------------------------
-    primary source fails   → fetcher's internal fallback handles it (in sources/)
-    entire fetcher fails   → DB has no fresh data for this layer
     no fresh DB data       → use last known state from Redis if within staleness window
     Redis also stale       → mark layer missing, redistribute composite weights,
                              apply confidence penalty
-
-Scheduler vs ad-hoc use
-------------------------
-The scheduler jobs call the lower-level helpers directly for efficiency:
-    - fetch all tickers in parallel with a shared httpx.AsyncClient
-    - then call _score_and_write() per ticker (DB read + compute + persist)
 
 score_ticker() is provided for tests and one-off manual runs.
 """
@@ -185,38 +184,6 @@ def _fallback_subindex(
     return SubIndexResult(float(value), n_signals, sources), as_of
 
 
-def _carry_forward_layer(
-    layer: str,
-    last_state: dict | None,
-) -> tuple[SubIndexResult | None, list, datetime | None]:
-    """
-    Carry forward a sub-index unchanged from the last Redis state.
-
-    Used when a job only recomputes its own layer and preserves others.
-    Unlike _fallback_subindex, this does NOT apply a staleness check —
-    the value is passed through as-is because the layer is not being
-    updated by this job.
-    """
-    if not last_state:
-        return None, [], None
-
-    entry = (last_state.get("sub_indices") or {}).get(layer)
-    if entry is None:
-        return None, [], None
-
-    value     = entry.get("value") if isinstance(entry, dict) else float(entry)
-    n_signals = entry.get("n_signals", 1) if isinstance(entry, dict) else 1
-    sources   = entry.get("sources", [])  if isinstance(entry, dict) else []
-
-    if value is None:
-        return None, [], None
-
-    si = SubIndexResult(float(value), n_signals, sources)
-    freshness = (last_state or {}).get("freshness") or {}
-    as_of = _parse_ts(freshness.get(f"{layer}_as_of"))
-    return si, [], as_of
-
-
 # ---------------------------------------------------------------------------
 # Per-layer scoring  (read DB → normalize → sub-index → fallback if empty)
 # ---------------------------------------------------------------------------
@@ -227,6 +194,9 @@ async def _score_market(
     last_state: dict | None,
 ) -> tuple[SubIndexResult | None, list[dict], datetime | None]:
     since = market_lookback_since(now)
+    # NOTE: If an ingestion job is currently mid-write, this may read data from
+    # the prior ingestion cycle for some tickers.  This is correct behavior —
+    # the next scoring tick will pick up any in-flight data.
     raw   = await get_signals_since(ticker, since, _MARKET_SIGNAL_TYPES + _MARKET_SIGNAL_TYPES_LEGACY)
     raw   = filter_stale_signals(raw, now)
     if raw:
@@ -324,22 +294,13 @@ async def _score_macro(
 # Core compute + persist  (no external API calls)
 # ---------------------------------------------------------------------------
 
-async def _score_and_write(
-    ticker: str,
-    layers: set[str] | None = None,
-) -> int:
+async def _score_and_write(ticker: str) -> int:
     """
-    Read layers from DB, compute the full scored state, and persist it.
+    Read all layers from DB, compute the full scored state, and persist it.
 
-    This is the inner scoring loop called by scheduler jobs after fetching.
-    No external API calls are made here.
-
-    Parameters
-    ----------
-    ticker : str
-    layers : When set, only recompute these layers; carry forward others
-             from the Redis cache unchanged.  None = recompute all
-             (default for ad-hoc / score_ticker use).
+    Called by the global scoring tick job after ingestion jobs have written
+    fresh data to the database.  All four layers are always recomputed from
+    current DB state — no carry-forward.
 
     Returns
     -------
@@ -353,31 +314,14 @@ async def _score_and_write(
     current_price: float | None = await get_latest_close(ticker)
 
     # ── Layer 07+08: feature engineering + sub-indices ────────────────────────
-    # Each layer is either freshly recomputed (if in `layers`) or carried
-    # forward from the last Redis state to avoid overwriting valid data.
+    # All four layers are freshly recomputed from DB state every scoring tick.
+    # If a layer has no fresh data, _fallback_subindex() recovers the cached
+    # value from Redis within the staleness window.
 
-    if layers is None or "market" in layers:
-        (market_si, market_sigs, market_as_of) = await _score_market(ticker, now, last_state)
-    else:
-        market_si, market_sigs, market_as_of = _carry_forward_layer("market", last_state)
-
-    if layers is None or "narrative" in layers:
-        (narrative_si, narrative_sigs, narrative_as_of) = await _score_narrative(ticker, now, last_state)
-    else:
-        narrative_si, narrative_sigs, narrative_as_of = _carry_forward_layer("narrative", last_state)
-
-    if layers is None or "influencer" in layers:
-        (influencer_si, influencer_sigs, influencer_as_of, analyst_as_of, insider_as_of) = await _score_influencer(ticker, now, last_state, current_price)
-    else:
-        influencer_si, influencer_sigs, influencer_as_of = _carry_forward_layer("influencer", last_state)
-        _freshness = (last_state or {}).get("freshness") or {}
-        analyst_as_of = _parse_ts(_freshness.get("influencer_as_of"))
-        insider_as_of = analyst_as_of
-
-    if layers is None or "macro" in layers:
-        (macro_si, macro_sigs, macro_as_of) = await _score_macro(now, last_state)
-    else:
-        macro_si, macro_sigs, macro_as_of = _carry_forward_layer("macro", last_state)
+    (market_si, market_sigs, market_as_of) = await _score_market(ticker, now, last_state)
+    (narrative_si, narrative_sigs, narrative_as_of) = await _score_narrative(ticker, now, last_state)
+    (influencer_si, influencer_sigs, influencer_as_of, analyst_as_of, insider_as_of) = await _score_influencer(ticker, now, last_state, current_price)
+    (macro_si, macro_sigs, macro_as_of) = await _score_macro(now, last_state)
 
     sub_indices: dict = {
         "market":     market_si,
@@ -402,15 +346,7 @@ async def _score_and_write(
     stale_list  = stale_sources(as_of_map, now=now)
 
     all_sigs    = market_sigs + narrative_sigs + influencer_sigs + macro_sigs
-    # Count signals from freshly scored layers (sigs list) plus carried-forward
-    # layers (n_signals stored in SubIndexResult). Without this, per-layer jobs
-    # would undercount and trigger a -20 low_signal_volume penalty incorrectly.
-    n_fresh     = sum(1 for s in all_sigs if (s.get("weight") or 0) > 0)
-    n_carried   = sum(
-        si.n_signals for layer, si in sub_indices.items()
-        if si is not None and layers is not None and layer not in layers
-    )
-    n_signals   = n_fresh + n_carried
+    n_signals   = sum(1 for s in all_sigs if (s.get("weight") or 0) > 0)
 
     conf_result = compute_confidence(
         missing_layers  = composite_result.missing_layers,
@@ -490,9 +426,11 @@ async def score_ticker(
     Parameters
     ----------
     ticker      : Ticker symbol (case-insensitive).
-    layer_scope : Which layer to freshly fetch from external APIs.
-                  None = all four layers.
+    layer_scope : Which external APIs to fetch from before scoring.
+                  None = fetch all four layers.
                   "market" | "narrative" | "influencer" | "macro"
+                  Note: scoring always recomputes all four layers from DB
+                  state regardless of which APIs were fetched.
     """
     ticker = ticker.upper()
 

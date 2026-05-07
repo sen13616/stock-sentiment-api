@@ -1,22 +1,26 @@
 """
 pipeline/scheduler.py
 
-APScheduler configuration for the background scoring pipeline (System A).
+APScheduler configuration for the background pipeline (System A).
 
-Jobs registered:
+Architecture (Sprint 3: global scoring tick)
+---------------------------------------------
+Ingestion jobs fetch data from external APIs and write to the database.
+They do NOT score.  A dedicated ``scoring_tick_job`` runs every 30 minutes
+and recomputes all four layers for every ticker from current DB state.
 
-    market_job       — weekdays 14:30–21:00 UTC, every 15 minutes
-    narrative_job    — every 30 minutes (24 × 7)
-    influencer_job   — every 6 hours
-    macro_job        — daily at 02:00 UTC
+Ingestion jobs:
+
+    market_job       — weekdays 14:30–21:00 UTC, every 15 minutes (data only)
+    market_eod_job   — weekdays 21:15 UTC (data only, captures closing prices)
+    narrative_job    — every 30 minutes (data only)
+    influencer_job   — every 6 hours (data only)
+    macro_job        — daily at 02:00 UTC (data only)
     short_volume_job — weekdays at 21:30 UTC (FINRA REGSHO, data only)
 
-Each job:
-  1. Fetches fresh signals from external APIs (in parallel for per-ticker layers)
-  2. Calls _score_and_write() for every ticker in the active universe
+Scoring job:
 
-The macro fetch is global (not per-ticker), so it is executed once before the
-per-ticker scoring loop to avoid 500 duplicate API calls.
+    scoring_tick_job — every 30 minutes, recomputes composite scores for all tickers
 
 Usage
 -----
@@ -115,17 +119,12 @@ _SCORE_SEM = asyncio.Semaphore(10)  # bound concurrent DB connections (asyncpg d
 async def _score_all(
     tickers: list[str],
     job_name: str,
-    layers: set[str] | None = None,
 ) -> tuple[int, int]:
     """
     Score all tickers concurrently, bounded by _SCORE_SEM to stay within
     the asyncpg connection pool limit.
 
-    Parameters
-    ----------
-    layers : Passed through to _score_and_write(); only these layers are
-             recomputed, others are carried forward from Redis cache.
-             None = recompute all layers.
+    All four layers are recomputed from current DB state for every ticker.
 
     Returns (fetched_count, total_layers_populated).
     """
@@ -146,7 +145,7 @@ async def _score_all(
         nonlocal fetched, total_layers
         async with _SCORE_SEM:
             try:
-                n_layers = await _score_and_write(ticker, layers=layers)
+                n_layers = await _score_and_write(ticker)
                 fetched += 1
                 total_layers += n_layers
             except Exception as exc:
@@ -252,9 +251,9 @@ async def market_job() -> None:
     """
     Market layer job — weekdays 14:30–21:00 UTC, every 15 minutes.
 
-    Batch-downloads OHLCV for all tickers via yfinance in one call, then
-    fetches RSI and derived signals per-ticker in parallel, and finally
-    recomputes composite scores.
+    Data-only: batch-downloads OHLCV for all tickers via yfinance in one
+    call, then fetches RSI and derived signals per-ticker in parallel.
+    Scoring is handled by the global scoring_tick_job.
     """
     job_counters.reset()
     t_start = time.monotonic()
@@ -272,18 +271,16 @@ async def market_job() -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         await _fetch_all_tickers(_market_fetcher, tickers, client, job_name="MARKET")
 
-    fetched, total_layers = await _score_all(tickers, "MARKET", layers={"market"})
     await _record_run("market")
 
     elapsed = time.monotonic() - t_start
-    avg = total_layers / fetched if fetched else 0
     print(
-        f"[MARKET] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
+        f"[MARKET] fetch done in {_fmt_elapsed(elapsed)} — {n} tickers",
         file=sys.stderr,
     )
     _log.info(
-        "market_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
-        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "market_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips",
+        n, elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
 
 
@@ -291,10 +288,10 @@ async def market_eod_job() -> None:
     """
     End-of-day market job — weekdays at 21:15 UTC (15 min after close).
 
-    Captures a fresh end-of-day score so that Redis always holds a valid
-    market sub-index before the overnight / weekend period begins.  Without
-    this job, users hitting the API outside market hours would see a null
-    market layer for the entire overnight period.
+    Data-only: captures definitive closing prices for all tickers.  The
+    next scoring_tick_job (~21:30 UTC) picks these up and produces the EOD
+    scored state so Redis holds a valid market sub-index before the
+    overnight / weekend period begins.
     """
     job_counters.reset()
     t_start = time.monotonic()
@@ -311,18 +308,16 @@ async def market_eod_job() -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         await _fetch_all_tickers(_market_fetcher, tickers, client, job_name="MARKET_EOD")
 
-    fetched, total_layers = await _score_all(tickers, "MARKET_EOD", layers={"market"})
     await _record_run("market_eod")
 
     elapsed = time.monotonic() - t_start
-    avg = total_layers / fetched if fetched else 0
     print(
-        f"[MARKET_EOD] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
+        f"[MARKET_EOD] fetch done in {_fmt_elapsed(elapsed)} — {n} tickers",
         file=sys.stderr,
     )
     _log.info(
-        "market_eod_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
-        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "market_eod_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips",
+        n, elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
 
 
@@ -330,7 +325,8 @@ async def narrative_job() -> None:
     """
     Narrative layer job — every 30 minutes.
 
-    Fetches news articles for all tickers, deduplicates, and recomputes scores.
+    Data-only: fetches news articles for all tickers and writes to DB.
+    Scoring is handled by the global scoring_tick_job.
     """
     job_counters.reset()
     t_start = time.monotonic()
@@ -341,18 +337,16 @@ async def narrative_job() -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         await _fetch_all_tickers(fetch_narrative_signals, tickers, client, job_name="NARRATIVE")
 
-    fetched, total_layers = await _score_all(tickers, "NARRATIVE", layers={"narrative"})
     await _record_run("narrative")
 
     elapsed = time.monotonic() - t_start
-    avg = total_layers / fetched if fetched else 0
     print(
-        f"[NARRATIVE] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
+        f"[NARRATIVE] fetch done in {_fmt_elapsed(elapsed)} — {n} tickers",
         file=sys.stderr,
     )
     _log.info(
-        "narrative_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
-        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "narrative_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips",
+        n, elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
 
 
@@ -360,7 +354,9 @@ async def influencer_job() -> None:
     """
     Influencer layer job — every 6 hours.
 
-    Fetches SEC insider filings and analyst signals for all tickers.
+    Data-only: fetches SEC insider filings and analyst signals for all
+    tickers and writes to DB.  Scoring is handled by the global
+    scoring_tick_job.
     """
     job_counters.reset()
     t_start = time.monotonic()
@@ -371,18 +367,16 @@ async def influencer_job() -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         await _fetch_all_tickers(fetch_influencer_signals, tickers, client, job_name="INFLUENCER")
 
-    fetched, total_layers = await _score_all(tickers, "INFLUENCER", layers={"influencer"})
     await _record_run("influencer")
 
     elapsed = time.monotonic() - t_start
-    avg = total_layers / fetched if fetched else 0
     print(
-        f"[INFLUENCER] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
+        f"[INFLUENCER] fetch done in {_fmt_elapsed(elapsed)} — {n} tickers",
         file=sys.stderr,
     )
     _log.info(
-        "influencer_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
-        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "influencer_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips",
+        n, elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
     )
 
 
@@ -390,8 +384,9 @@ async def macro_job() -> None:
     """
     Macro layer job — daily at 02:00 UTC.
 
-    Fetches VIX and sector ETF data once (global, not per-ticker), then
-    recomputes composite scores for all tickers using fresh macro signals.
+    Data-only: fetches VIX and sector ETF data once (global, not
+    per-ticker) and writes to DB.  Scoring is handled by the global
+    scoring_tick_job.
     """
     job_counters.reset()
     t_start = time.monotonic()
@@ -403,21 +398,14 @@ async def macro_job() -> None:
         except Exception as exc:
             _log.error("macro_job: macro fetch failed: %s", exc, exc_info=True)
 
-    tickers = await get_active_tickers()
-    n = len(tickers)
-    fetched, total_layers = await _score_all(tickers, "MACRO", layers={"macro"})
     await _record_run("macro")
 
     elapsed = time.monotonic() - t_start
-    avg = total_layers / fetched if fetched else 0
     print(
-        f"[MACRO] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} fetched, avg {avg:.1f}/4 layers populated",
+        f"[MACRO] fetch done in {_fmt_elapsed(elapsed)}",
         file=sys.stderr,
     )
-    _log.info(
-        "macro_job complete: %d/%d fetched, avg %.1f/4 layers, %d rate-limit skips, %d net-error skips",
-        fetched, n, avg, job_counters.rate_limit_skips, job_counters.net_error_skips,
-    )
+    _log.info("macro_job complete in %.1fs", elapsed)
 
 
 async def short_volume_job() -> None:
@@ -449,6 +437,38 @@ async def short_volume_job() -> None:
         file=sys.stderr,
     )
     _log.info("short_volume_job complete: %d tickers in %.1fs", n_tickers, elapsed)
+
+
+async def scoring_tick_job() -> None:
+    """
+    Global scoring tick — every 30 minutes.
+
+    Recomputes all four layers (market, narrative, influencer, macro) for
+    every active ticker from current DB state.  This is the ONLY job that
+    calls _score_all(); ingestion jobs are data-only.
+    """
+    t_start = time.monotonic()
+    _log.info("scoring_tick_job: starting")
+    tickers = await get_active_tickers()
+    n = len(tickers)
+
+    fetched, total_layers = await _score_all(tickers, "SCORING_TICK")
+    await _record_run("scoring_tick")
+
+    elapsed = time.monotonic() - t_start
+    avg = total_layers / fetched if fetched else 0
+    print(
+        f"[SCORING_TICK] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} scored, avg {avg:.1f}/4 layers",
+        file=sys.stderr,
+    )
+    _log.info(
+        "scoring_tick_job complete: %d/%d scored, avg %.1f/4 layers in %.1fs",
+        fetched, n, avg, elapsed,
+    )
+    if elapsed > 300:
+        _log.warning(
+            "scoring_tick_job exceeded 5-minute threshold: %.1fs elapsed", elapsed
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -515,4 +535,14 @@ scheduler.add_job(
     max_instances=1,
     coalesce=True,
     misfire_grace_time=600,
+)
+
+scheduler.add_job(
+    scoring_tick_job,
+    trigger=IntervalTrigger(minutes=30),
+    id="scoring_tick",
+    name="Global scoring tick (30 min)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=120,
 )
