@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 
 _SOURCE_WEIGHTS: dict[str, float] = {
-    "alpha_vantage": 1.0,
+    "alpha_vantage": 0.7,
     "polygon":       0.9,
     "sec_edgar":     1.0,
     "finnhub":       0.8,
@@ -199,6 +199,8 @@ def score_market_signals(
         if scorer is None:
             continue
         value  = float(row["value"])
+        if math.isnan(value) or math.isinf(value):
+            continue
         score  = scorer(value)
         result.append(_build(
             sig_type, value, score,
@@ -226,13 +228,18 @@ def score_narrative_signals(
         sentiment = art.get("provider_sentiment")
         if sentiment is None:
             continue
+        sent_f = float(sentiment)
+        if math.isnan(sent_f) or math.isinf(sent_f):
+            continue
         relevance = float(art.get("relevance_score") or 0.5)
+        if relevance < 0.1:
+            continue
         source    = art.get("source", "news")
         published = art["published_at"]
 
-        score  = max(0.0, min(100.0, 50.0 + 50.0 * float(sentiment)))
+        score  = max(0.0, min(100.0, 50.0 + 50.0 * sent_f))
         w_time = _time_weight(published, now)
-        weight = _source_weight(source) * w_time * max(relevance, 0.1)
+        weight = _source_weight(source) * w_time * relevance
 
         result.append({
             "signal_type": "provider_sentiment",
@@ -264,6 +271,8 @@ def score_influencer_signals(
     for row in raw:
         sig_type = row["signal_type"]
         value    = float(row["value"])
+        if math.isnan(value) or math.isinf(value):
+            continue
         source   = row.get("source", "unknown")
         ts       = row["timestamp"]
 
@@ -301,6 +310,8 @@ def score_macro_signals(
         if scorer is None:
             continue
         value  = float(row["value"])
+        if math.isnan(value) or math.isinf(value):
+            continue
         score  = scorer(value)
         result.append(_build(
             sig_type, value, score,

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from datetime import datetime, timezone
 
@@ -232,16 +233,16 @@ def _compute_returns(
     closes = [c for _, c in close_history]
     results = []
 
-    if len(closes) >= 1 and closes[-1] != 0:
-        r1 = (current_close - closes[-1]) / closes[-1]
+    if len(closes) >= 1 and closes[-1] > 0 and current_close > 0:
+        r1 = math.log(current_close / closes[-1])
         results.append(("return_1d", round(r1, 6)))
 
-    if len(closes) >= 5 and closes[-5] != 0:
-        r5 = (current_close - closes[-5]) / closes[-5]
+    if len(closes) >= 5 and closes[-5] > 0 and current_close > 0:
+        r5 = math.log(current_close / closes[-5])
         results.append(("return_5d", round(r5, 6)))
 
-    if len(closes) >= 20 and closes[-20] != 0:
-        r20 = (current_close - closes[-20]) / closes[-20]
+    if len(closes) >= 20 and closes[-20] > 0 and current_close > 0:
+        r20 = math.log(current_close / closes[-20])
         results.append(("return_20d", round(r20, 6)))
 
     return results

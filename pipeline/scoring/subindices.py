@@ -12,12 +12,12 @@ Generic formula (spec §Mathematics)
 The shrinkage factor `min(1, n/5)` pulls the result toward 50 when fewer
 than 5 signals are present, guarding against single-signal overconfidence.
 
-Market sub-index (structured 5-component aggregation)
+Market sub-index (structured 6-component aggregation)
 ------------------------------------------------------
     The market layer uses a dedicated ``compute_market_sub_index()`` that
-    combines five component groups with explicit weights:
-        returns (0.35), momentum (0.15), order_flow (0.25),
-        liquidity (0.10), short_volume (0.15).
+    combines six component groups with explicit weights:
+        returns (0.30), momentum (0.15), order_flow (0.20),
+        liquidity (0.10), short_volume (0.15), volume (0.10).
     Missing components have their weight redistributed proportionally.
 
 Expected input per signal dict
@@ -82,60 +82,65 @@ def compute_sub_index(signals: list[dict]) -> SubIndexResult | None:
 
 
 # ---------------------------------------------------------------------------
-# Market sub-index — structured 5-component aggregation
+# Market sub-index — structured 6-component aggregation
 # ---------------------------------------------------------------------------
 
 # Tunable component weights — will be revisited during empirical validation
 # in the research paper Phase C.  Must sum to 1.0.
+# Sprint 2 (G-S3): volume added as 6th component at 0.10; returns reduced
+# from 0.35→0.30 and order_flow from 0.25→0.20 to compensate.
 MARKET_COMPONENT_WEIGHTS: dict[str, float] = {
-    "returns":      0.35,
+    "returns":      0.30,
     "momentum":     0.15,
-    "order_flow":   0.25,
+    "order_flow":   0.20,
     "liquidity":    0.10,
     "short_volume": 0.15,
+    "volume":       0.10,
 }
 
 # Signal types that feed each component
 _RETURNS_TYPES = frozenset({"return_1d", "return_5d", "return_20d"})
 _COMPONENT_TYPES = _RETURNS_TYPES | {
     "rsi_14", "order_flow_imbalance", "bid_ask_spread_bps",
-    "short_volume_ratio_otc",
+    "short_volume_ratio_otc", "volume_ratio",
 }
 
 
 def compute_market_sub_index(signals: list[dict]) -> SubIndexResult | None:
     """
-    Compute the market sub-index using a structured 5-component weighted
+    Compute the market sub-index using a structured 6-component weighted
     average.
 
     Components (all converted to [-1, +1] before weighting)
     ---------------------------------------------------------
-        returns      (0.35) — mean of return_1d / return_5d / return_20d scores
+        returns      (0.30) — mean of return_1d / return_5d / return_20d scores
         momentum     (0.15) — rsi_14 as a *momentum* indicator (NOT contrarian).
                               RSI 70 → +1 (strong upward momentum = bullish).
                               This is intentional: the sub-index treats RSI as a
                               trend-following signal.  The contrarian interpretation
                               (overbought = bearish) is surfaced in the driver
                               description instead.
-        order_flow   (0.25) — order_flow_imbalance (CLV); close near high = +1
+        order_flow   (0.20) — order_flow_imbalance (CLV); close near high = +1
         liquidity    (0.10) — bid_ask_spread_bps; wider spread = -1 (bearish)
         short_volume (0.15) — short_volume_ratio_otc z-score; higher recent
                               short volume relative to 20d history = bearish.
                               Already negated by the normalizer: score > 50 = bullish.
+        volume       (0.10) — volume_ratio (current / 20d avg); elevated volume =
+                              mild bullish (market interest); score already in [20, 80].
 
     Missing-signal handling
     -----------------------
     If a component has no valid signals, its weight is redistributed
     proportionally across present components (avoids biasing toward neutral).
-    If 4 of 5 components are missing the layer is considered missing entirely
+    If 5 of 6 components are missing the layer is considered missing entirely
     and None is returned.
 
     Parameters
     ----------
     signals : list[dict]
         Pre-scored signal dicts from ``score_market_signals()``.  Only those
-        with signal_type in the five component groups contribute to the
-        sub-index; others (volume_ratio, buy_pressure, etc.) are silently
+        with signal_type in the six component groups contribute to the
+        sub-index; others (buy_pressure, sell_pressure, etc.) are silently
         ignored here but still available for driver extraction.
 
     Returns
@@ -182,7 +187,12 @@ def compute_market_sub_index(signals: list[dict]) -> SubIndexResult | None:
         s = by_type["short_volume_ratio_otc"][0]
         components["short_volume"] = (s["score"] - 50.0) / 50.0
 
-    # ── 4 of 5 missing → layer missing ───────────────────────────────────
+    # Volume — volume_ratio score already in [20, 80] from normalizer
+    if "volume_ratio" in by_type:
+        s = by_type["volume_ratio"][0]
+        components["volume"] = (s["score"] - 50.0) / 50.0
+
+    # ── 5 of 6 missing → layer missing ───────────────────────────────────
     if len(components) <= 1:
         return None
 

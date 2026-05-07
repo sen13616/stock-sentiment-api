@@ -4,9 +4,12 @@ tests/test_close_dedup.py — Verify _compute_returns handles same-day closes co
 Without DISTINCT ON (DATE(timestamp)) dedup in get_close_history, the
 first intraday cron of a session inserts today's close into history.
 _compute_returns then divides today by today, collapsing return_1d to ~0.
+
+Note: _compute_returns uses log returns as of Sprint 1 (G-S4).
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 
 import pytest
@@ -31,7 +34,7 @@ def test_same_day_closes_yield_nonzero_return():
     result_dict = dict(results)
 
     assert "return_1d" in result_dict
-    expected = (today_close - yesterday_close) / yesterday_close
+    expected = math.log(today_close / yesterday_close)
     assert abs(result_dict["return_1d"] - expected) < 1e-6
     assert result_dict["return_1d"] != 0.0  # Must not be zero
 
@@ -49,7 +52,7 @@ def test_duplicate_today_in_history_collapses_return():
     results = _compute_returns(today_close, history)
     result_dict = dict(results)
 
-    # With the leaked duplicate, return_1d divides today by today → 0.0
+    # With the leaked duplicate, return_1d = log(today/today) = 0.0
     assert result_dict["return_1d"] == 0.0
 
 
@@ -70,6 +73,6 @@ def test_compute_returns_5d_20d():
     assert "return_5d" in result_dict
     assert "return_20d" in result_dict
 
-    assert abs(result_dict["return_1d"] - (110.0 - 104.0) / 104.0) < 1e-6
-    assert abs(result_dict["return_5d"] - (110.0 - 100.0) / 100.0) < 1e-6
-    assert abs(result_dict["return_20d"] - (110.0 - 85.0) / 85.0) < 1e-6
+    assert abs(result_dict["return_1d"] - math.log(110.0 / 104.0)) < 1e-6
+    assert abs(result_dict["return_5d"] - math.log(110.0 / 100.0)) < 1e-6
+    assert abs(result_dict["return_20d"] - math.log(110.0 / 85.0)) < 1e-6
