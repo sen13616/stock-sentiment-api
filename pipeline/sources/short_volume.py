@@ -84,9 +84,9 @@ def _parse_short_volume(text: str) -> dict[str, dict[str, int]]:
 
         try:
             symbol = parts[1].strip()
-            short_vol = int(parts[2].strip())
+            short_vol = int(float(parts[2].strip()))   # FINRA switched to float format ~2026-02-24
             # parts[3] is ShortExemptVolume — skip
-            total_vol = int(parts[4].strip())
+            total_vol = int(float(parts[4].strip()))   # FINRA switched to float format ~2026-02-24
         except (ValueError, IndexError):
             continue
 
@@ -291,8 +291,14 @@ async def ingest_short_volume(client: httpx.AsyncClient) -> int:
         await insert_signals(rows)
 
     n_tickers = len(rows) // 3
-    _log.info(
-        "ingest_short_volume: %d tickers written for %s (from %d raw tickers)",
-        n_tickers, actual_date.isoformat(), len(data),
-    )
+    if n_tickers == 0:
+        _log.warning(
+            "ingest_short_volume: 0 tickers written for %s (parsed %d raw tickers, none in universe)",
+            actual_date.isoformat(), len(data),
+        )
+    else:
+        _log.info(
+            "ingest_short_volume: %d tickers written for %s (from %d raw tickers)",
+            n_tickers, actual_date.isoformat(), len(data),
+        )
     return n_tickers
