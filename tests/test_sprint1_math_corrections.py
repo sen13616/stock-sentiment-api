@@ -2,12 +2,16 @@
 tests/test_sprint1_math_corrections.py
 
 Tests for Sprint 1 (G-S4, G-S6, G-S13, G-S14) and Sprint 2 (G-S3) changes.
-All tests are pure — no DB, Redis, or async.
+
+Sprint 4 note: score_market_signals, score_influencer_signals, and
+score_macro_signals are now async (z-score requires DB reads).  Tests mock
+get_signal_history to return [] so z-score falls back to parametric.
 """
 from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -101,38 +105,48 @@ def _make_ts():
     return datetime(2026, 5, 1, 14, 0, tzinfo=timezone.utc)
 
 
+# Mock get_signal_history to return [] so z-score falls back to parametric
+_mock_history = patch("db.queries.raw_signals.get_signal_history",
+                      new_callable=AsyncMock, return_value=[])
+
+
 class TestNanInfGuardsMarket:
     """score_market_signals should skip NaN/Inf values."""
 
     def _row(self, sig_type: str, value: float) -> dict:
         return {"signal_type": sig_type, "value": value, "source": "computed", "timestamp": _make_ts()}
 
-    def test_nan_value_skipped(self):
+    async def test_nan_value_skipped(self):
         raw = [self._row("rsi_14", float("nan"))]
-        result = score_market_signals("TEST", raw, _make_ts())
+        with _mock_history:
+            result = await score_market_signals("TEST", raw, _make_ts())
         assert len(result) == 0
 
-    def test_inf_value_skipped(self):
+    async def test_inf_value_skipped(self):
         raw = [self._row("rsi_14", float("inf"))]
-        result = score_market_signals("TEST", raw, _make_ts())
+        with _mock_history:
+            result = await score_market_signals("TEST", raw, _make_ts())
         assert len(result) == 0
 
-    def test_neg_inf_value_skipped(self):
+    async def test_neg_inf_value_skipped(self):
         raw = [self._row("rsi_14", float("-inf"))]
-        result = score_market_signals("TEST", raw, _make_ts())
+        with _mock_history:
+            result = await score_market_signals("TEST", raw, _make_ts())
         assert len(result) == 0
 
-    def test_valid_value_passes(self):
+    async def test_valid_value_passes(self):
         raw = [self._row("rsi_14", 50.0)]
-        result = score_market_signals("TEST", raw, _make_ts())
+        with _mock_history:
+            result = await score_market_signals("TEST", raw, _make_ts())
         assert len(result) == 1
 
-    def test_mixed_nan_and_valid(self):
+    async def test_mixed_nan_and_valid(self):
         raw = [
             self._row("rsi_14", float("nan")),
             self._row("volume_ratio", 1.2),
         ]
-        result = score_market_signals("TEST", raw, _make_ts())
+        with _mock_history:
+            result = await score_market_signals("TEST", raw, _make_ts())
         assert len(result) == 1
         assert result[0]["signal_type"] == "volume_ratio"
 
@@ -167,19 +181,22 @@ class TestNanInfGuardsInfluencer:
     def _row(self, sig_type: str, value: float) -> dict:
         return {"signal_type": sig_type, "value": value, "source": "finnhub", "timestamp": _make_ts()}
 
-    def test_nan_value_skipped(self):
+    async def test_nan_value_skipped(self):
         raw = [self._row("insider_net_shares", float("nan"))]
-        result = score_influencer_signals("TEST", raw, _make_ts())
+        with _mock_history:
+            result = await score_influencer_signals("TEST", raw, _make_ts())
         assert len(result) == 0
 
-    def test_inf_value_skipped(self):
+    async def test_inf_value_skipped(self):
         raw = [self._row("analyst_buy_pct", float("inf"))]
-        result = score_influencer_signals("TEST", raw, _make_ts())
+        with _mock_history:
+            result = await score_influencer_signals("TEST", raw, _make_ts())
         assert len(result) == 0
 
-    def test_valid_value_passes(self):
+    async def test_valid_value_passes(self):
         raw = [self._row("insider_net_shares", 1000.0)]
-        result = score_influencer_signals("TEST", raw, _make_ts())
+        with _mock_history:
+            result = await score_influencer_signals("TEST", raw, _make_ts())
         assert len(result) == 1
 
 
@@ -189,19 +206,22 @@ class TestNanInfGuardsMacro:
     def _row(self, sig_type: str, value: float) -> dict:
         return {"signal_type": sig_type, "value": value, "source": "alpha_vantage", "timestamp": _make_ts()}
 
-    def test_nan_vix_skipped(self):
+    async def test_nan_vix_skipped(self):
         raw = [self._row("vix", float("nan"))]
-        result = score_macro_signals(raw, _make_ts())
+        with _mock_history:
+            result = await score_macro_signals(raw, _make_ts())
         assert len(result) == 0
 
-    def test_inf_vix_skipped(self):
+    async def test_inf_vix_skipped(self):
         raw = [self._row("vix", float("inf"))]
-        result = score_macro_signals(raw, _make_ts())
+        with _mock_history:
+            result = await score_macro_signals(raw, _make_ts())
         assert len(result) == 0
 
-    def test_valid_vix_passes(self):
+    async def test_valid_vix_passes(self):
         raw = [self._row("vix", 22.0)]
-        result = score_macro_signals(raw, _make_ts())
+        with _mock_history:
+            result = await score_macro_signals(raw, _make_ts())
         assert len(result) == 1
 
 

@@ -1,25 +1,30 @@
 """
 tests/test_short_volume_normalizer.py
 
-Unit tests for the short_volume_ratio_otc rolling z-score normalizer
-and the updated _MARKET_SIGNAL_TYPES registry.
+Unit tests for short_volume_ratio_otc normalization via RollingZScorer
+(Sprint 4: migrated from legacy _normalize_short_volume_z).
 
-All tests are pure and synchronous — no DB, Redis, or async required.
+Validates:
+- _ZSCORE_CONFIG params match G-K2/G-K3 (window=90, min_obs=30, σ_floor=1e-4)
+- Scoring direction (negate=True: high short volume → bearish → score < 50)
+- Clamping, gating, zero-variance behavior delegated to RollingZScorer
+- Driver label, description, explanation template, source weight
+- _MARKET_SIGNAL_TYPES registry
 """
 from __future__ import annotations
 
 import pytest
 
-from pipeline.features.normalize import _normalize_short_volume_z
+from pipeline.features.normalize import RollingZScorer, _ZSCORE_CONFIG
 
 
 # ---------------------------------------------------------------------------
 # Helpers — build synthetic history with known mean and std
 # ---------------------------------------------------------------------------
 
-def _make_history(mean: float, std: float, n: int = 20) -> list[float]:
+def _make_history(mean: float, std: float, n: int = 50) -> list[float]:
     """
-    Build a synthetic history of `n` values with known mean and std.
+    Build a synthetic history of `n` values with known mean and population std.
 
     Uses half values at (mean - std) and half at (mean + std).
     Population std of this arrangement = std exactly.
@@ -30,94 +35,138 @@ def _make_history(mean: float, std: float, n: int = 20) -> list[float]:
     return [low] * half + [high] * (n - half)
 
 
+def _scorer() -> RollingZScorer:
+    """Return the RollingZScorer instance registered for short_volume_ratio_otc."""
+    return _ZSCORE_CONFIG["short_volume_ratio_otc"]
+
+
 # ---------------------------------------------------------------------------
-# (a) Today is +2 std above mean → output near -0.67
+# Config params match G-K2 / G-K3
+# ---------------------------------------------------------------------------
+
+class TestZScoreConfigParams:
+
+    def test_is_rolling_z_scorer(self):
+        assert isinstance(_scorer(), RollingZScorer)
+
+    def test_window_is_90(self):
+        assert _scorer().window == 90
+
+    def test_min_obs_is_30(self):
+        """G-K2: min_obs 10 → 30."""
+        assert _scorer().min_obs == 30
+
+    def test_fill_threshold_is_05(self):
+        assert _scorer().fill_threshold == 0.5
+
+    def test_effective_min_obs_is_45(self):
+        """fill_threshold=0.5 + window=90 → effective_min = max(30, 45) = 45."""
+        assert _scorer().effective_min_obs == 45
+
+    def test_sigma_floor_is_1e4(self):
+        """G-K3: sigma_floor 1e-12 → 1e-4."""
+        assert _scorer().sigma_floor == 1e-4
+
+    def test_negate_is_true(self):
+        """High short volume = bearish → negate."""
+        assert _scorer().negate is True
+
+
+# ---------------------------------------------------------------------------
+# (a) Today is +2 std above mean → score < 50 (bearish)
 # ---------------------------------------------------------------------------
 
 class TestZScorePlusTwoSigma:
 
-    def test_output_near_negative_067(self):
-        """z = +2 → -(2/3) ≈ -0.667"""
-        history = _make_history(mean=0.50, std=0.10, n=20)
+    def test_output_below_50(self):
+        """z = +2, negate → score ≈ 16.67."""
+        history = _make_history(mean=0.50, std=0.10, n=50)
         today = 0.50 + 2 * 0.10  # = 0.70
-        result = _normalize_short_volume_z(history, today)
+        result = _scorer().score_from_history(history, today)
         assert result is not None
-        assert abs(result - (-2.0 / 3.0)) < 0.01
+        # negate: score = 50 + 50*(-2/3) ≈ 16.67
+        expected = 50.0 + 50.0 * (-2.0 / 3.0)
+        assert abs(result - expected) < 0.01
 
-    def test_output_sign_is_negative(self):
-        """High short volume (positive z) → bearish → negative output."""
-        history = _make_history(mean=0.45, std=0.05, n=20)
+    def test_output_is_bearish(self):
+        """High short volume (positive z, negated) → score < 50."""
+        history = _make_history(mean=0.45, std=0.05, n=50)
         today = 0.45 + 2 * 0.05
-        result = _normalize_short_volume_z(history, today)
+        result = _scorer().score_from_history(history, today)
         assert result is not None
-        assert result < 0
+        assert result < 50.0
 
 
 # ---------------------------------------------------------------------------
-# (b) Today is -2 std below mean → output near +0.67
+# (b) Today is -2 std below mean → score > 50 (bullish)
 # ---------------------------------------------------------------------------
 
 class TestZScoreMinusTwoSigma:
 
-    def test_output_near_positive_067(self):
-        """z = -2 → -(-2/3) = +0.667"""
-        history = _make_history(mean=0.50, std=0.10, n=20)
+    def test_output_above_50(self):
+        """z = -2, negate → score ≈ 83.33."""
+        history = _make_history(mean=0.50, std=0.10, n=50)
         today = 0.50 - 2 * 0.10  # = 0.30
-        result = _normalize_short_volume_z(history, today)
+        result = _scorer().score_from_history(history, today)
         assert result is not None
-        assert abs(result - (2.0 / 3.0)) < 0.01
+        expected = 50.0 + 50.0 * (2.0 / 3.0)
+        assert abs(result - expected) < 0.01
 
-    def test_output_sign_is_positive(self):
-        """Low short volume (negative z) → bullish → positive output."""
-        history = _make_history(mean=0.45, std=0.05, n=20)
+    def test_output_is_bullish(self):
+        """Low short volume (negative z, negated) → score > 50."""
+        history = _make_history(mean=0.45, std=0.05, n=50)
         today = 0.45 - 2 * 0.05
-        result = _normalize_short_volume_z(history, today)
+        result = _scorer().score_from_history(history, today)
         assert result is not None
-        assert result > 0
+        assert result > 50.0
 
 
 # ---------------------------------------------------------------------------
-# (c) Today is at mean (z = 0) → output 0.0
+# (c) Today is at mean (z = 0) → score = 50 (neutral)
 # ---------------------------------------------------------------------------
 
 class TestZScoreAtMean:
 
-    def test_output_is_zero(self):
-        history = _make_history(mean=0.50, std=0.10, n=20)
-        today = 0.50
-        result = _normalize_short_volume_z(history, today)
+    def test_output_is_50(self):
+        history = _make_history(mean=0.50, std=0.10, n=50)
+        result = _scorer().score_from_history(history, 0.50)
         assert result is not None
-        assert abs(result) < 0.01
+        assert abs(result - 50.0) < 0.01
 
-    def test_exact_zero(self):
-        history = _make_history(mean=0.42, std=0.08, n=20)
-        today = 0.42
-        result = _normalize_short_volume_z(history, today)
+    def test_exact_50(self):
+        history = _make_history(mean=0.42, std=0.08, n=50)
+        result = _scorer().score_from_history(history, 0.42)
         assert result is not None
-        assert abs(result) < 1e-9
+        assert abs(result - 50.0) < 1e-6
 
 
 # ---------------------------------------------------------------------------
-# (d) Only 8 historical points → returns None
+# (d) Insufficient history → returns None (effective_min_obs=45)
 # ---------------------------------------------------------------------------
 
 class TestInsufficientHistory:
 
-    def test_8_points_returns_none(self):
-        history = _make_history(mean=0.50, std=0.10, n=8)
-        assert _normalize_short_volume_z(history, 0.50) is None
+    def test_44_points_returns_none(self):
+        """window=90, fill_threshold=0.5 → effective_min=45. So 44 is insufficient."""
+        history = _make_history(mean=0.50, std=0.10, n=44)
+        assert _scorer().score_from_history(history, 0.50) is None
 
-    def test_9_points_returns_none(self):
-        history = _make_history(mean=0.50, std=0.10, n=9)
-        assert _normalize_short_volume_z(history, 0.50) is None
+    def test_29_points_returns_none(self):
+        history = _make_history(mean=0.50, std=0.10, n=29)
+        assert _scorer().score_from_history(history, 0.50) is None
+
+    def test_10_points_returns_none(self):
+        """Legacy min_obs was 10 — now effectively 45, so 10 is insufficient."""
+        history = _make_history(mean=0.50, std=0.10, n=10)
+        assert _scorer().score_from_history(history, 0.50) is None
 
     def test_0_points_returns_none(self):
-        assert _normalize_short_volume_z([], 0.50) is None
+        assert _scorer().score_from_history([], 0.50) is None
 
-    def test_10_points_returns_value(self):
-        """10 is the minimum — should produce a result."""
-        history = _make_history(mean=0.50, std=0.10, n=10)
-        result = _normalize_short_volume_z(history, 0.50)
+    def test_45_points_returns_value(self):
+        """45 is the effective minimum — should produce a result."""
+        history = _make_history(mean=0.50, std=0.10, n=45)
+        result = _scorer().score_from_history(history, 0.50)
         assert result is not None
 
 
@@ -128,43 +177,43 @@ class TestInsufficientHistory:
 class TestZeroVariance:
 
     def test_constant_history_returns_none(self):
-        history = [0.45] * 20
-        assert _normalize_short_volume_z(history, 0.45) is None
+        history = [0.45] * 50
+        assert _scorer().score_from_history(history, 0.45) is None
 
     def test_constant_history_different_today_returns_none(self):
-        history = [0.50] * 15
-        assert _normalize_short_volume_z(history, 0.60) is None
+        history = [0.50] * 50
+        assert _scorer().score_from_history(history, 0.60) is None
 
 
 # ---------------------------------------------------------------------------
-# Clipping at ±3 sigma → output clamped to [-1, +1]
+# Clipping at ±3 sigma → output clamped to [0, 100]
 # ---------------------------------------------------------------------------
 
 class TestClipping:
 
-    def test_extreme_positive_z_clamped(self):
-        """z > 3 → clamped to 3 → output = -1.0"""
-        history = _make_history(mean=0.50, std=0.01, n=20)
-        today = 0.50 + 5 * 0.01  # z = 5 → clamped to 3
-        result = _normalize_short_volume_z(history, today)
+    def test_extreme_positive_z_clamped_to_0(self):
+        """z > 3, negate → clamped to -3 → score = 0."""
+        history = _make_history(mean=0.50, std=0.01, n=50)
+        today = 0.50 + 5 * 0.01  # z = 5 → clamped
+        result = _scorer().score_from_history(history, today)
         assert result is not None
-        assert abs(result - (-1.0)) < 0.01
+        assert abs(result - 0.0) < 0.01
 
-    def test_extreme_negative_z_clamped(self):
-        """z < -3 → clamped to -3 → output = +1.0"""
-        history = _make_history(mean=0.50, std=0.01, n=20)
-        today = 0.50 - 5 * 0.01  # z = -5 → clamped to -3
-        result = _normalize_short_volume_z(history, today)
+    def test_extreme_negative_z_clamped_to_100(self):
+        """z < -3, negate → clamped to +3 → score = 100."""
+        history = _make_history(mean=0.50, std=0.01, n=50)
+        today = 0.50 - 5 * 0.01  # z = -5 → clamped
+        result = _scorer().score_from_history(history, today)
         assert result is not None
-        assert abs(result - 1.0) < 0.01
+        assert abs(result - 100.0) < 0.01
 
     def test_output_always_in_range(self):
-        """Output is always in [-1, 1]."""
-        history = _make_history(mean=0.40, std=0.05, n=20)
+        """Output is always in [0, 100]."""
+        history = _make_history(mean=0.40, std=0.05, n=50)
         for today in [0.0, 0.20, 0.40, 0.60, 0.80, 1.0]:
-            result = _normalize_short_volume_z(history, today)
+            result = _scorer().score_from_history(history, today)
             assert result is not None
-            assert -1.0 <= result <= 1.0, f"Out of range for today={today}: {result}"
+            assert 0.0 <= result <= 100.0, f"Out of range for today={today}: {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -190,36 +239,32 @@ class TestMarketSignalTypesRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Score conversion: normalized [-1, 1] → score [0, 100]
+# Score conversion: RollingZScorer [0, 100] consistency
 # ---------------------------------------------------------------------------
 
 class TestScoreConversion:
-    """Verify that the [0, 100] score computed from the normalized value
-    aligns with the standard pipeline convention (50 = neutral)."""
+    """Verify that scores align with pipeline convention (50 = neutral)."""
 
     def test_neutral_maps_to_50(self):
-        """z = 0 → normalized = 0 → score = 50"""
-        history = _make_history(mean=0.50, std=0.10, n=20)
-        normalized = _normalize_short_volume_z(history, 0.50)
-        assert normalized is not None
-        score = 50.0 + 50.0 * normalized
-        assert abs(score - 50.0) < 0.5
+        """z = 0 → score = 50"""
+        history = _make_history(mean=0.50, std=0.10, n=50)
+        result = _scorer().score_from_history(history, 0.50)
+        assert result is not None
+        assert abs(result - 50.0) < 0.5
 
     def test_bearish_maps_below_50(self):
-        """High short volume (z = +2) → bearish → score < 50"""
-        history = _make_history(mean=0.50, std=0.10, n=20)
-        normalized = _normalize_short_volume_z(history, 0.70)
-        assert normalized is not None
-        score = 50.0 + 50.0 * normalized
-        assert score < 50.0
+        """High short volume (z = +2, negated) → score < 50"""
+        history = _make_history(mean=0.50, std=0.10, n=50)
+        result = _scorer().score_from_history(history, 0.70)
+        assert result is not None
+        assert result < 50.0
 
     def test_bullish_maps_above_50(self):
-        """Low short volume (z = -2) → bullish → score > 50"""
-        history = _make_history(mean=0.50, std=0.10, n=20)
-        normalized = _normalize_short_volume_z(history, 0.30)
-        assert normalized is not None
-        score = 50.0 + 50.0 * normalized
-        assert score > 50.0
+        """Low short volume (z = -2, negated) → score > 50"""
+        history = _make_history(mean=0.50, std=0.10, n=50)
+        result = _scorer().score_from_history(history, 0.30)
+        assert result is not None
+        assert result > 50.0
 
 
 # ---------------------------------------------------------------------------
@@ -269,3 +314,20 @@ class TestExplanationTemplate:
         from pipeline.features.normalize import _SOURCE_WEIGHTS
         assert "finra_regsho" in _SOURCE_WEIGHTS
         assert _SOURCE_WEIGHTS["finra_regsho"] == 0.9
+
+
+# ---------------------------------------------------------------------------
+# Regression: legacy _normalize_short_volume_z removed
+# ---------------------------------------------------------------------------
+
+class TestLegacyRemoved:
+
+    def test_legacy_function_not_importable(self):
+        """_normalize_short_volume_z was replaced by RollingZScorer."""
+        with pytest.raises(ImportError):
+            from pipeline.features.normalize import _normalize_short_volume_z  # noqa: F401
+
+    def test_legacy_score_function_not_importable(self):
+        """score_short_volume_ratio was replaced by score_market_signals."""
+        with pytest.raises(ImportError):
+            from pipeline.features.normalize import score_short_volume_ratio  # noqa: F401

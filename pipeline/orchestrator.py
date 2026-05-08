@@ -52,7 +52,6 @@ from pipeline.features.normalize import (
     score_macro_signals,
     score_market_signals,
     score_narrative_signals,
-    score_short_volume_ratio,
 )
 from pipeline.persistence.pg_writer import persist_scored_state
 from pipeline.persistence.redis_writer import read_scored_state, write_scored_state
@@ -200,15 +199,9 @@ async def _score_market(
     raw   = await get_signals_since(ticker, since, _MARKET_SIGNAL_TYPES + _MARKET_SIGNAL_TYPES_LEGACY)
     raw   = filter_stale_signals(raw, now)
     if raw:
-        sigs  = score_market_signals(ticker, raw, now)
-
-        # short_volume_ratio_otc uses a per-ticker rolling z-score that
-        # requires a DB read, so it's handled separately (async).
-        sv_rows = [r for r in raw if r["signal_type"] == "short_volume_ratio_otc"]
-        if sv_rows:
-            sv_sig = await score_short_volume_ratio(ticker, sv_rows[0], now)
-            if sv_sig is not None:
-                sigs.append(sv_sig)
+        # Sprint 4: score_market_signals is now async (z-score requires DB reads).
+        # Short volume z-score is handled inline — no separate call needed.
+        sigs  = await score_market_signals(ticker, raw, now)
 
         si    = compute_market_sub_index(sigs)
         as_of = _latest_ts(raw)
@@ -247,7 +240,7 @@ async def _score_influencer(
     since = now - _LAYER_LOOKBACK["influencer"]
     raw   = await get_signals_since(ticker, since, _INFLUENCER_SIGNAL_TYPES)
     if raw:
-        sigs  = score_influencer_signals(ticker, raw, now, current_price)
+        sigs  = await score_influencer_signals(ticker, raw, now, current_price)
         si    = compute_sub_index(sigs)
         as_of = _latest_ts(raw)
 
@@ -280,7 +273,7 @@ async def _score_macro(
 
     all_raw = vix_rows + etf_rows
     if all_raw:
-        sigs  = score_macro_signals(all_raw, now)
+        sigs  = await score_macro_signals(all_raw, now)
         si    = compute_sub_index(sigs)
         as_of = _latest_ts(all_raw)
         if si is not None:

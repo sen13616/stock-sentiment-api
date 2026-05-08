@@ -19,13 +19,20 @@ Scoring conventions
 -------------------
 - All scores are direction-corrected: > 50 = bullish, < 50 = bearish.
 - Weights encode two factors: source trustworthiness and time decay.
-- Time decay uses a 48-hour half-life (exponential).
+- Time decay uses per-source half-lives: market 1h, news 12h, analyst 3d,
+  filings 7d, macro 14d  (Sprint 4, G-S1).
 - Source weights: official filings / exchange data = 1.0, third-party = 0.7–0.9.
+- Z-score normalization (Sprint 4, G-C1): signals with sufficient history
+  (≥ 30 observations) use adaptive z-score; others fall back to fixed
+  parametric scorers.
 """
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timezone
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Source weights
@@ -43,19 +50,41 @@ _SOURCE_WEIGHTS: dict[str, float] = {
 }
 
 # ---------------------------------------------------------------------------
-# Time decay — exponential, half-life = 48 hours
+# Per-source half-lives (Sprint 4, G-S1)
+#
+# Research paper §Historical Data specifies per-category decay rates.
+# Layer-level defaults with source-specific overrides where the same source
+# appears in multiple layers with different decay characteristics.
 # ---------------------------------------------------------------------------
 
-_HALF_LIFE_H = 48.0
-_LAMBDA      = math.log(2) / _HALF_LIFE_H
+_LAYER_HALF_LIFE_H: dict[str, float] = {
+    "market":     1.0,      # 60 min
+    "narrative":  12.0,     # 12 hours
+    "influencer": 72.0,     # 3 days (analyst default)
+    "macro":      336.0,    # 14 days
+}
+
+# Overrides for specific (layer, source) combinations
+_HALF_LIFE_OVERRIDE: dict[tuple[str, str], float] = {
+    ("influencer", "sec_edgar"): 168.0,   # SEC filings: 7 days
+}
 
 
-def _time_weight(ts: datetime, now: datetime) -> float:
-    """Return exponential decay weight. Fresh signal = 1.0; 48 h old = 0.5."""
+def _get_half_life(layer: str, source: str) -> float:
+    """Look up half-life for a (layer, source) combination."""
+    return _HALF_LIFE_OVERRIDE.get(
+        (layer, source.lower()),
+        _LAYER_HALF_LIFE_H.get(layer, 48.0),
+    )
+
+
+def _time_weight(ts: datetime, now: datetime, half_life_h: float = 48.0) -> float:
+    """Return exponential decay weight.  Fresh signal = 1.0; half_life_h old = 0.5."""
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     age_h = max(0.0, (now - ts).total_seconds() / 3600)
-    return math.exp(-_LAMBDA * age_h)
+    lam = math.log(2) / half_life_h
+    return math.exp(-lam * age_h)
 
 
 def _source_weight(source: str) -> float:
@@ -63,7 +92,150 @@ def _source_weight(source: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Per-signal-type score functions  (all return float in [0, 100])
+# Rolling z-score normalizer (Sprint 4, G-C1)
+# ---------------------------------------------------------------------------
+
+class RollingZScorer:
+    """
+    Adaptive z-score normalizer.
+
+    Computes z = (x - μ) / max(σ, σ_floor) from a historical window,
+    clamps to ±3, and maps to [0, 100] (50 = neutral).
+
+    Parameters
+    ----------
+    window         : Number of historical observations to fetch.
+    min_obs        : Absolute minimum observations required; returns None if fewer.
+    sigma_floor    : Minimum standard deviation to avoid division by near-zero.
+    negate         : If True, negate z before mapping (for bearish-when-high
+                     signals like VIX, RSI contrarian, bid-ask spread, short volume).
+    fill_threshold : Fraction of ``window`` that must be present before z-score
+                     activates.  Effective minimum = max(min_obs, ceil(window *
+                     fill_threshold)).  Default 0.5 ensures the z-score baseline
+                     is computed against a meaningful history span.
+    """
+
+    __slots__ = ("window", "min_obs", "sigma_floor", "negate", "fill_threshold")
+
+    def __init__(
+        self,
+        window: int,
+        min_obs: int = 30,
+        sigma_floor: float = 1e-4,
+        negate: bool = False,
+        fill_threshold: float = 0.5,
+    ) -> None:
+        self.window = window
+        self.min_obs = min_obs
+        self.sigma_floor = sigma_floor
+        self.negate = negate
+        self.fill_threshold = fill_threshold
+
+    @property
+    def effective_min_obs(self) -> int:
+        """Minimum observations considering both min_obs and fill_threshold."""
+        import math
+        return max(self.min_obs, math.ceil(self.window * self.fill_threshold))
+
+    def score_from_history(
+        self, history: list[float], current_value: float
+    ) -> float | None:
+        """
+        Pure z-score computation from a pre-fetched history list.
+
+        Parameters
+        ----------
+        history       : Historical values (oldest first), up to ``window``.
+        current_value : The value to normalize.
+
+        Returns
+        -------
+        float in [0, 100] or None if insufficient data / variance below floor.
+        """
+        if len(history) < self.effective_min_obs:
+            return None
+
+        n = len(history)
+        mean = sum(history) / n
+        variance = sum((x - mean) ** 2 for x in history) / n
+        std = variance ** 0.5
+
+        if std < self.sigma_floor:
+            return None
+
+        z = (current_value - mean) / std
+        z = max(-3.0, min(3.0, z))
+
+        if self.negate:
+            z = -z
+
+        return 50.0 + 50.0 * (z / 3.0)
+
+    async def score(
+        self, ticker: str, signal_type: str, current_value: float
+    ) -> float | None:
+        """Fetch history from DB and compute z-score."""
+        from db.queries.raw_signals import get_signal_history
+
+        history = await get_signal_history(ticker, signal_type, limit=self.window)
+        return self.score_from_history(history, current_value)
+
+
+# Per-signal-type z-score configuration.
+# Signals not listed here use parametric scorers only.
+_ZSCORE_CONFIG: dict[str, RollingZScorer] = {
+    # Intra-day market signals: window=500 observations
+    "rsi_14":               RollingZScorer(window=500, negate=True),
+    "return_1d":            RollingZScorer(window=500),
+    "return_5d":            RollingZScorer(window=500),
+    "return_20d":           RollingZScorer(window=500),
+    "volume_ratio":         RollingZScorer(window=500),
+    "order_flow_imbalance": RollingZScorer(window=500),
+    "bid_ask_spread_bps":   RollingZScorer(window=500, negate=True),
+    # Daily-cadence signals: window=90 observations
+    "short_volume_ratio_otc": RollingZScorer(window=90, negate=True),
+    "insider_net_shares":     RollingZScorer(window=90),
+    "analyst_buy_pct":        RollingZScorer(window=90),
+    "vix":                    RollingZScorer(window=90, negate=True),
+}
+
+
+# ---------------------------------------------------------------------------
+# Telemetry — z-score vs parametric fallback counts (Sprint 4)
+# ---------------------------------------------------------------------------
+
+_scoring_method_counts: dict[str, dict[str, int]] = {}
+
+
+def _record_method(signal_type: str, method: str) -> None:
+    """Record that a signal was scored via 'zscore' or 'parametric_fallback'."""
+    if signal_type not in _scoring_method_counts:
+        _scoring_method_counts[signal_type] = {"zscore": 0, "parametric_fallback": 0}
+    _scoring_method_counts[signal_type][method] += 1
+
+
+def reset_scoring_telemetry() -> None:
+    """Clear telemetry counters.  Called at the start of each scoring tick."""
+    _scoring_method_counts.clear()
+
+
+def log_scoring_telemetry() -> None:
+    """Log per-signal-type scoring method counts.  Called after each scoring tick."""
+    if not _scoring_method_counts:
+        return
+    for sig_type in sorted(_scoring_method_counts):
+        c = _scoring_method_counts[sig_type]
+        _log.info(
+            "[telemetry] %s: zscore=%d parametric_fallback=%d",
+            sig_type, c["zscore"], c["parametric_fallback"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Per-signal-type parametric score functions  (all return float in [0, 100])
+#
+# These are the FALLBACK path when z-score has insufficient history (< 30 obs).
+# Do not delete — they remain active until enough data accumulates per signal.
 # ---------------------------------------------------------------------------
 
 def _score_rsi(rsi: float) -> float:
@@ -162,7 +334,8 @@ def _build(
     ticker: str,
     now: datetime,
 ) -> dict:
-    w = _source_weight(source) * _time_weight(timestamp, now)
+    half_life = _get_half_life(layer, source)
+    w = _source_weight(source) * _time_weight(timestamp, now, half_life)
     return {
         "signal_type": signal_type,
         "value":       value,
@@ -178,7 +351,7 @@ def _build(
 # Public scoring functions — one per layer
 # ---------------------------------------------------------------------------
 
-def score_market_signals(
+async def score_market_signals(
     ticker: str,
     raw: list[dict],
     now: datetime,
@@ -186,27 +359,63 @@ def score_market_signals(
     """
     Convert raw market signal rows to scored dicts.
 
+    Uses z-score normalization when sufficient history is available
+    (≥ 30 observations); falls back to parametric scorers otherwise.
+
     Parameters
     ----------
     ticker : str
     raw    : rows from get_signals_since() — keys: signal_type, value, source, timestamp.
     now    : reference time for time decay.
     """
+    from db.queries.raw_signals import get_signal_history
+
     result: list[dict] = []
+
+    # Group by signal_type for efficient history fetch (one DB call per type)
+    by_type: dict[str, list[dict]] = {}
     for row in raw:
-        sig_type = row["signal_type"]
-        scorer   = _SIMPLE_SCORERS.get(sig_type)
-        if scorer is None:
+        by_type.setdefault(row["signal_type"], []).append(row)
+
+    for sig_type, rows in by_type.items():
+        zscore_cfg = _ZSCORE_CONFIG.get(sig_type)
+        parametric = _SIMPLE_SCORERS.get(sig_type)
+        if zscore_cfg is None and parametric is None:
             continue
-        value  = float(row["value"])
-        if math.isnan(value) or math.isinf(value):
-            continue
-        score  = scorer(value)
-        result.append(_build(
-            sig_type, value, score,
-            row.get("source", "unknown"), row["timestamp"],
-            "market", ticker, now,
-        ))
+
+        # Pre-fetch z-score history once per signal_type
+        history: list[float] | None = None
+        if zscore_cfg is not None:
+            history = await get_signal_history(ticker, sig_type, limit=zscore_cfg.window)
+
+        for row in rows:
+            value = float(row["value"])
+            if math.isnan(value) or math.isinf(value):
+                continue
+
+            score: float | None = None
+            method = "parametric_fallback"
+
+            # Try z-score first
+            if zscore_cfg is not None and history is not None:
+                score = zscore_cfg.score_from_history(history, value)
+                if score is not None:
+                    method = "zscore"
+
+            # Fallback to parametric
+            if score is None and parametric is not None:
+                score = parametric(value)
+
+            if score is None:
+                continue
+
+            _record_method(sig_type, method)
+            result.append(_build(
+                sig_type, value, score,
+                row.get("source", "unknown"), row["timestamp"],
+                "market", ticker, now,
+            ))
+
     return result
 
 
@@ -238,7 +447,8 @@ def score_narrative_signals(
         published = art["published_at"]
 
         score  = max(0.0, min(100.0, 50.0 + 50.0 * sent_f))
-        w_time = _time_weight(published, now)
+        half_life = _get_half_life("narrative", source)
+        w_time = _time_weight(published, now, half_life)
         weight = _source_weight(source) * w_time * relevance
 
         result.append({
@@ -253,7 +463,7 @@ def score_narrative_signals(
     return result
 
 
-def score_influencer_signals(
+async def score_influencer_signals(
     ticker: str,
     raw: list[dict],
     now: datetime,
@@ -262,136 +472,135 @@ def score_influencer_signals(
     """
     Convert raw influencer signal rows to scored dicts.
 
+    Uses z-score normalization for insider_net_shares and analyst_buy_pct
+    when sufficient history is available; falls back to parametric otherwise.
+    analyst_target_price always uses parametric scoring (Decision 5).
+
     Parameters
     ----------
     current_price : Latest close price, used to score analyst_target_price.
                     If None, analyst_target_price signals are skipped.
     """
-    result: list[dict] = []
-    for row in raw:
-        sig_type = row["signal_type"]
-        value    = float(row["value"])
-        if math.isnan(value) or math.isinf(value):
-            continue
-        source   = row.get("source", "unknown")
-        ts       = row["timestamp"]
+    from db.queries.raw_signals import get_signal_history
 
-        if sig_type == "analyst_target_price":
-            score = _score_analyst_target(value, current_price)
+    result: list[dict] = []
+
+    by_type: dict[str, list[dict]] = {}
+    for row in raw:
+        by_type.setdefault(row["signal_type"], []).append(row)
+
+    for sig_type, rows in by_type.items():
+        zscore_cfg = _ZSCORE_CONFIG.get(sig_type)
+        parametric = _SIMPLE_SCORERS.get(sig_type)
+        is_target = (sig_type == "analyst_target_price")
+
+        if zscore_cfg is None and parametric is None and not is_target:
+            continue
+
+        # Pre-fetch z-score history once per signal_type
+        history: list[float] | None = None
+        if zscore_cfg is not None:
+            history = await get_signal_history(ticker, sig_type, limit=zscore_cfg.window)
+
+        for row in rows:
+            value = float(row["value"])
+            if math.isnan(value) or math.isinf(value):
+                continue
+            source = row.get("source", "unknown")
+            ts = row["timestamp"]
+
+            score: float | None = None
+            method = "parametric_fallback"
+
+            if is_target:
+                score = _score_analyst_target(value, current_price)
+                if score is None:
+                    continue
+            else:
+                # Try z-score first
+                if zscore_cfg is not None and history is not None:
+                    score = zscore_cfg.score_from_history(history, value)
+                    if score is not None:
+                        method = "zscore"
+
+                # Fallback to parametric
+                if score is None and parametric is not None:
+                    score = parametric(value)
+
             if score is None:
                 continue
-        else:
-            scorer = _SIMPLE_SCORERS.get(sig_type)
-            if scorer is None:
-                continue
-            score = scorer(value)
 
-        result.append(_build(sig_type, value, score, source, ts, "influencer", ticker, now))
+            _record_method(sig_type, method)
+            result.append(_build(sig_type, value, score, source, ts, "influencer", ticker, now))
+
     return result
 
 
-def score_macro_signals(
+async def score_macro_signals(
     raw: list[dict],
     now: datetime,
 ) -> list[dict]:
     """
     Convert raw macro signal rows (VIX + sector ETF returns) to scored dicts.
 
+    VIX uses z-score normalization when sufficient history is available.
+    sector_etf_return_20d always uses parametric scoring (deferred — insufficient
+    per-ETF history).
+
     Parameters
     ----------
     raw : rows from get_signals_since() across '_MACRO_' and ETF tickers.
     """
+    from db.queries.raw_signals import get_signal_history
+
     result: list[dict] = []
+
+    by_type: dict[str, list[dict]] = {}
     for row in raw:
         sig_type = row["signal_type"]
         if sig_type not in ("vix", "sector_etf_return_20d"):
             continue
-        scorer = _SIMPLE_SCORERS.get(sig_type)
-        if scorer is None:
+        by_type.setdefault(sig_type, []).append(row)
+
+    for sig_type, rows in by_type.items():
+        zscore_cfg = _ZSCORE_CONFIG.get(sig_type)
+        parametric = _SIMPLE_SCORERS.get(sig_type)
+        if zscore_cfg is None and parametric is None:
             continue
-        value  = float(row["value"])
-        if math.isnan(value) or math.isinf(value):
-            continue
-        score  = scorer(value)
-        result.append(_build(
-            sig_type, value, score,
-            row.get("source", "alpha_vantage"), row["timestamp"],
-            "macro", "_MACRO_", now,
-        ))
+
+        # For VIX z-score, fetch history using the _MACRO_ ticker
+        history: list[float] | None = None
+        if zscore_cfg is not None:
+            # VIX is stored under _MACRO_; ETF signals under their ticker.
+            # Since only VIX has z-score config, _MACRO_ is always correct here.
+            history = await get_signal_history("_MACRO_", sig_type, limit=zscore_cfg.window)
+
+        for row in rows:
+            value = float(row["value"])
+            if math.isnan(value) or math.isinf(value):
+                continue
+
+            score: float | None = None
+            method = "parametric_fallback"
+
+            if zscore_cfg is not None and history is not None:
+                score = zscore_cfg.score_from_history(history, value)
+                if score is not None:
+                    method = "zscore"
+
+            if score is None and parametric is not None:
+                score = parametric(value)
+
+            if score is None:
+                continue
+
+            _record_method(sig_type, method)
+            result.append(_build(
+                sig_type, value, score,
+                row.get("source", "alpha_vantage"), row["timestamp"],
+                "macro", "_MACRO_", now,
+            ))
+
     return result
 
 
-# ---------------------------------------------------------------------------
-# Short volume ratio — per-ticker rolling z-score normalizer
-# ---------------------------------------------------------------------------
-
-def _normalize_short_volume_z(
-    history: list[float],
-    today_value: float,
-) -> float | None:
-    """
-    Compute a normalized score for short_volume_ratio_otc via rolling z-score.
-
-    Parameters
-    ----------
-    history     : Recent daily short_volume_ratio_otc values (oldest first).
-                  Typically 20 trading days.
-    today_value : Today's short_volume_ratio_otc value to score.
-
-    Returns
-    -------
-    float in [-1, 1] or None if insufficient data / zero variance.
-
-    Sign convention: high recent short volume = bearish positioning,
-    so the output is NEGATED (z = +3 → -1, z = -3 → +1).
-    """
-    if len(history) < 10:
-        return None
-
-    n = len(history)
-    mean = sum(history) / n
-    variance = sum((x - mean) ** 2 for x in history) / n
-    std = variance ** 0.5
-
-    if std < 1e-12:
-        return None
-
-    z = (today_value - mean) / std
-    z = max(-3.0, min(3.0, z))
-    return -(z / 3.0)
-
-
-async def score_short_volume_ratio(
-    ticker: str,
-    raw_row: dict,
-    now: datetime,
-) -> dict | None:
-    """
-    Normalize a short_volume_ratio_otc signal via per-ticker rolling z-score.
-
-    Fetches 20-day history from the DB, computes the z-score, and returns
-    a fully scored signal dict — or None if history is insufficient.
-
-    This is async because it requires a DB read for the lookback window.
-    It is called separately from score_market_signals() (which is sync).
-    """
-    from db.queries.raw_signals import get_signal_history
-
-    history = await get_signal_history(ticker, "short_volume_ratio_otc", limit=20)
-    today_value = float(raw_row["value"])
-
-    normalized = _normalize_short_volume_z(history, today_value)
-    if normalized is None:
-        return None
-
-    score = 50.0 + 50.0 * normalized
-    return _build(
-        "short_volume_ratio_otc",
-        today_value,
-        score,
-        raw_row.get("source", "finra_regsho"),
-        raw_row["timestamp"],
-        "market",
-        ticker,
-        now,
-    )
