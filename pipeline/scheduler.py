@@ -46,6 +46,7 @@ from tqdm.asyncio import tqdm as _atqdm
 
 from db.queries.universe import get_active_tickers
 from db.redis import get_redis
+from pipeline.features.normalize import log_scoring_telemetry, reset_scoring_telemetry
 from pipeline.orchestrator import _score_and_write
 from pipeline.rate_limits import job_counters
 from pipeline.sources.influencer import fetch_influencer_signals
@@ -449,10 +450,12 @@ async def scoring_tick_job() -> None:
     """
     t_start = time.monotonic()
     _log.info("scoring_tick_job: starting")
+    reset_scoring_telemetry()
     tickers = await get_active_tickers()
     n = len(tickers)
 
     fetched, total_layers = await _score_all(tickers, "SCORING_TICK")
+    log_scoring_telemetry()
     await _record_run("scoring_tick")
 
     elapsed = time.monotonic() - t_start
