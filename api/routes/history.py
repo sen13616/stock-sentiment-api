@@ -62,11 +62,16 @@ async def get_sentiment_history(
             "influencer": row.get("influencer_index"),
             "macro":      row.get("macro_index"),
         }
+        # Prefer smoothed score; fall back to raw for pre-EMA rows
+        smoothed = row.get("composite_score_smoothed")
+        raw_score = row["composite_score"]
+        display_score = smoothed if smoothed is not None else raw_score
         entries.append(
             HistoryEntry(
                 timestamp      = row["timestamp"],
-                score          = int(round(row["composite_score"])),
-                label          = score_to_label(int(round(row["composite_score"]))),
+                score          = int(round(display_score)),
+                score_raw      = int(round(raw_score)),
+                label          = score_to_label(int(round(display_score))),
                 confidence     = int(row["confidence_score"]),
                 sub_indices    = HistorySubIndices(**layer_values),
                 missing_layers = [l for l, v in layer_values.items() if v is None],

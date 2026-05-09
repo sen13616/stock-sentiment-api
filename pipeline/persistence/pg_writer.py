@@ -29,6 +29,8 @@ checked first, then a fallback alias.
     macro freshness     macro_as_of          freshness.macro_as_of
     close price         close_price          price.close
     volume              volume               price.volume
+    smoothed composite  composite_score_smoothed  (no alias)
+    EMA obs count       ema_obs_count             (no alias)
 
 Required keys
     ticker      str
@@ -97,11 +99,24 @@ async def persist_scored_state(state: dict) -> None:
     ticker    = state["ticker"]
     timestamp = _as_datetime(state["timestamp"])
 
-    # ── composite score: "composite_score" or "score" ──────────────────────────
-    _composite_raw = state.get("composite_score") or state.get("score")
+    # ── composite score ─────────────────────────────────────────────────────────
+    # The state dict uses "composite_score" for the smoothed value (served by
+    # the API) and "composite_score_raw" for the unsmoothed value.  The DB
+    # column "composite_score" stores the RAW value to preserve backward
+    # compatibility with existing data.
+    _composite_raw = (
+        state.get("composite_score_raw")
+        or state.get("composite_score")
+        or state.get("score")
+    )
     if _composite_raw is None:
-        raise ValueError("state must contain 'composite_score' or 'score'")
+        raise ValueError("state must contain 'composite_score_raw', 'composite_score', or 'score'")
     composite = float(_composite_raw)
+
+    # ── EMA smoothed score + observation counter ─────────────────────────────
+    _smoothed = state.get("composite_score_smoothed")
+    composite_smoothed: float | None = float(_smoothed) if _smoothed is not None else None
+    ema_obs_count: int = int(state.get("ema_obs_count") or 0)
 
     # ── sub-indices: flat keys take priority, nested sub_indices as fallback ───
     sub_indices = state.get("sub_indices") or {}
@@ -136,21 +151,23 @@ async def persist_scored_state(state: dict) -> None:
         async with conn.transaction():
             await sh_queries.insert_row(
                 conn,
-                ticker           = ticker,
-                composite_score  = composite,
-                market_index     = market_index,
-                narrative_index  = narrative_index,
-                influencer_index = influencer_index,
-                macro_index      = macro_index,
-                confidence_score = conf_score,
-                confidence_flags = conf_flags,
-                top_drivers      = top_drivers,
-                divergence       = divergence,
-                market_as_of     = market_as_of,
-                narrative_as_of  = narrative_as_of,
-                influencer_as_of = influencer_as_of,
-                macro_as_of      = macro_as_of,
-                timestamp        = timestamp,
+                ticker                   = ticker,
+                composite_score          = composite,
+                market_index             = market_index,
+                narrative_index          = narrative_index,
+                influencer_index         = influencer_index,
+                macro_index              = macro_index,
+                confidence_score         = conf_score,
+                confidence_flags         = conf_flags,
+                top_drivers              = top_drivers,
+                divergence               = divergence,
+                market_as_of             = market_as_of,
+                narrative_as_of          = narrative_as_of,
+                influencer_as_of         = influencer_as_of,
+                macro_as_of              = macro_as_of,
+                timestamp                = timestamp,
+                composite_score_smoothed = composite_smoothed,
+                ema_obs_count            = ema_obs_count,
             )
 
             if close is not None:

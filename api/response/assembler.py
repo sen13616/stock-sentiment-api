@@ -98,10 +98,18 @@ async def _load_from_db(ticker: str) -> dict | None:
         drivers = row.get("top_drivers")
         if isinstance(drivers, str):
             drivers = json.loads(drivers)
+        # Map DB columns to Redis state shape.
+        # DB composite_score = raw; DB composite_score_smoothed = smoothed.
+        # Redis composite_score = smoothed (with raw fallback for pre-EMA rows).
+        smoothed = row.get("composite_score_smoothed")
+        raw_score = row["composite_score"]
         return {
-            "ticker":          ticker.upper(),
-            "composite_score": row["composite_score"],
-            "confidence":      {"score": row["confidence_score"], "flags": flags or []},
+            "ticker":                    ticker.upper(),
+            "composite_score":           smoothed if smoothed is not None else raw_score,
+            "composite_score_raw":       raw_score,
+            "composite_score_smoothed":  smoothed,
+            "ema_obs_count":             row.get("ema_obs_count") or 0,
+            "confidence":                {"score": row["confidence_score"], "flags": flags or []},
             "sub_indices": {
                 "market":     {"value": row.get("market_index")},
                 "narrative":  {"value": row.get("narrative_index")},
@@ -218,9 +226,19 @@ def _build_pro(state: dict) -> ProTierResponse:
     }
     missing_layers = [layer for layer, val in layer_values.items() if val is None]
 
+    # score_raw: unsmoothed composite (pro only)
+    raw_val = state.get("composite_score_raw")
+    score_raw = int(round(raw_val)) if raw_val is not None else None
+
+    # ema_obs_count: monotonic counter (pro only)
+    obs_count = state.get("ema_obs_count")
+    ema_obs_count = int(obs_count) if obs_count is not None else None
+
     return ProTierResponse(
         ticker            = state["ticker"].upper(),
         score             = score,
+        score_raw         = score_raw,
+        ema_obs_count     = ema_obs_count,
         label             = score_to_label(score),
         confidence        = confidence,
         sub_indices       = SubIndices(**layer_values),

@@ -56,6 +56,7 @@ from pipeline.features.normalize import (
 from pipeline.persistence.pg_writer import persist_scored_state
 from pipeline.persistence.redis_writer import read_scored_state, write_scored_state
 from pipeline.scoring.composite import compute_composite
+from pipeline.scoring.ema import compute_ema
 from pipeline.scoring.divergence import compute_divergence
 from pipeline.scoring.drivers import extract_drivers
 from pipeline.scoring.subindices import SubIndexResult, compute_market_sub_index, compute_sub_index
@@ -328,6 +329,25 @@ async def _score_and_write(ticker: str) -> int:
     present_values             = {k: v.value for k, v in sub_indices.items() if v is not None}
     div_result, effective_score = compute_divergence(present_values, composite_result.score)
 
+    # ── EMA smoothing (Sprint 5a, G-C3) ────────────────────────────────────────
+    prev_smoothed: float | None = None
+    prev_obs_count: int = 0
+    dt_hours: float = 0.0
+
+    if last_state:
+        prev_smoothed  = last_state.get("composite_score_smoothed")
+        # Fall back to composite_score if composite_score_smoothed is absent
+        # (pre-Sprint-5a states in Redis have no smoothed key).
+        if prev_smoothed is None:
+            prev_smoothed = last_state.get("composite_score")
+        prev_obs_count = int(last_state.get("ema_obs_count") or 0)
+        prev_ts        = _parse_ts(last_state.get("timestamp"))
+        if prev_ts is not None:
+            dt_hours = max(0.0, (now - prev_ts).total_seconds() / 3600.0)
+
+    smoothed_score = compute_ema(effective_score, prev_smoothed, dt_hours)
+    ema_obs_count  = prev_obs_count + 1
+
     # ── Staleness and confidence ───────────────────────────────────────────────
     as_of_map = {
         "market":  market_as_of,
@@ -353,10 +373,18 @@ async def _score_and_write(ticker: str) -> int:
     explanation = generate_explanation(drivers)
 
     # ── Assemble state ─────────────────────────────────────────────────────────
+    # In Redis, composite_score stores the SMOOTHED value (served as API score).
+    # composite_score_raw stores the raw value (served as API score_raw, pro only).
+    # composite_score_smoothed mirrors composite_score for the PG writer, which
+    # writes it to the DB column of the same name (the DB composite_score column
+    # retains the raw value — see pg_writer.py).
     state: dict = {
-        "ticker":          ticker,
-        "timestamp":       now,
-        "composite_score": round(effective_score, 2),
+        "ticker":                    ticker,
+        "timestamp":                 now,
+        "composite_score":           round(smoothed_score, 2),
+        "composite_score_raw":       round(effective_score, 2),
+        "composite_score_smoothed":  round(smoothed_score, 2),
+        "ema_obs_count":             ema_obs_count,
         "sub_indices": {
             k: {
                 "value":     round(v.value, 2),
@@ -391,9 +419,11 @@ async def _score_and_write(ticker: str) -> int:
     n_populated = sum(1 for v in sub_indices.values() if v is not None)
 
     _log.info(
-        "[%s] scored  composite=%.1f  confidence=%d  divergence=%s  missing=%s  layers=%d/4",
+        "[%s] scored  raw=%.1f  smoothed=%.1f  ema_n=%d  confidence=%d  divergence=%s  missing=%s  layers=%d/4",
         ticker,
         effective_score,
+        smoothed_score,
+        ema_obs_count,
         conf_result.score,
         div_result.flag,
         composite_result.missing_layers or "none",
