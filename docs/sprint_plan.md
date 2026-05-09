@@ -124,13 +124,14 @@ This plan covers all items in the master checklist across Phases 1–4 and the m
 - **Risk level:** Medium
 - **One-sentence rationale:** Forward-only EMA implementation — adds temporal smoothing to eliminate score jitter for new data, completing the paper's core methodology requirements.
 
-### Sprint 5b — EMA historical backfill
+### Sprint 5b — EMA historical backfill *(DEFERRED post-deadline)*
 
+- **Status:** DEFERRED past May 10 deadline. Forward-only EMA (Sprint 5a) is sufficient for Phase 1 methodology compliance. Sprint 7 does not depend on this sprint.
 - **Size:** Medium
 - **Branch:** `feature/sprint-5b-ema-backfill`
-- **Phase of master checklist:** Phase 1.2
+- **Phase of master checklist:** Phase 1.2 (non-blocking for Phase 1 gate)
 - **Items addressed:** G-C3 (historical backfill of smoothed scores)
-- **Decisions required before this sprint:** API contract decision from Sprint 5a must be locked (determines which column is served as default)
+- **Decisions required before this sprint:** API contract decision from Sprint 5a must be locked (determines which column is served as default) — **RESOLVED** in Sprint 5a
 - **Dependencies on prior sprints:** Sprint 5a (EMA implementation must be verified in production before backfilling historical data)
 - **Expected files modified:**
   - `tools/backfill_ema.py` — new file: walk-forward EMA backfill script that reads `sentiment_history` rows chronologically per ticker and computes `composite_score_smoothed` retroactively
@@ -139,7 +140,7 @@ This plan covers all items in the master checklist across Phases 1–4 and the m
 - **Verification approach:** Run backfill on 10-ticker subset; verify backfilled smoothed scores match what live EMA would have produced; compare pre/post backfill API responses for historical endpoint
 - **Estimated duration:** 2–3 days
 - **Risk level:** Medium
-- **One-sentence rationale:** Retroactively fills smoothed scores for historical data so the history API serves consistent EMA-smoothed values, not just forward-only.
+- **One-sentence rationale:** Retroactively fills smoothed scores for historical data so the history API serves consistent EMA-smoothed values, not just forward-only. Deferred because the history endpoint already handles NULL smoothed values via fallback to raw composite.
 
 ### Sprint 6 — Wire semantic deduplication (G-C6)
 
@@ -165,7 +166,7 @@ This plan covers all items in the master checklist across Phases 1–4 and the m
 - **Phase of master checklist:** Phase 1.4
 - **Items addressed:** All Phase 1.4 items (capture baselines, document changes, tag release); audit re-runs (moved from Sprint 4)
 - **Decisions required before this sprint:** Phase 1 deploy strategy (Open decision #2 — incremental vs all-at-once)
-- **Dependencies on prior sprints:** All of Sprints 1–6 and 5b must be complete and verified
+- **Dependencies on prior sprints:** All of Sprints 1–6 must be complete and verified (Sprint 5b deferred post-deadline — historical EMA backfill is not required for Phase 1 methodology compliance; forward-only EMA is sufficient)
 - **Deliverables:**
   - `tools/exports/phase1_baseline_post.json` — post-Phase-1 10-ticker baseline
   - `tools/exports/phase1_comparison.md` — comparison report (pre vs post)

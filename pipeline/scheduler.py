@@ -52,6 +52,7 @@ from pipeline.rate_limits import job_counters
 from pipeline.sources.influencer import fetch_influencer_signals
 from pipeline.sources.macro import fetch_macro_signals
 from pipeline.sources.market import fetch_market_signals
+from pipeline.nlp.dedup import cluster_articles
 from pipeline.sources.narrative import fetch_narrative_signals
 from pipeline.sources.short_volume import ingest_short_volume
 
@@ -61,6 +62,40 @@ _RUN_KEY_TTL = 7 * 24 * 3600  # 7 days
 
 # tqdm bar format used for both fetch and score phases
 _BAR_FMT = "{desc}: {bar:20} {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}"
+
+
+async def _get_cluster_telemetry(since_hours: float = 48.0) -> dict:
+    """
+    Query the DB for cluster source breakdown and compute telemetry summary.
+
+    Returns dict with keys: cross_source_clusters, same_source_clusters,
+    largest_cluster_size.  Called after the clustering phase completes.
+    """
+    from db.queries.raw_articles import get_cluster_source_breakdown
+
+    cross_source = 0
+    same_source = 0
+    largest = 0
+
+    try:
+        clusters = await get_cluster_source_breakdown(since_hours)
+        for c in clusters:
+            sources = c.get("sources") or []
+            count = c.get("article_count") or 0
+            if len(sources) > 1:
+                cross_source += 1
+            else:
+                same_source += 1
+            if count > largest:
+                largest = count
+    except Exception as exc:
+        _log.warning("_get_cluster_telemetry failed: %s", exc)
+
+    return {
+        "cross_source_clusters": cross_source,
+        "same_source_clusters": same_source,
+        "largest_cluster_size": largest,
+    }
 
 
 async def _record_run(job_id: str) -> None:
@@ -326,7 +361,10 @@ async def narrative_job() -> None:
     """
     Narrative layer job — every 30 minutes.
 
-    Data-only: fetches news articles for all tickers and writes to DB.
+    Two phases:
+      1. Fetch: ingests news articles from AV + Finnhub for all tickers (data-only).
+      2. Cluster: runs semantic dedup (Stage 2) on unclustered articles per ticker.
+
     Scoring is handled by the global scoring_tick_job.
     """
     job_counters.reset()
@@ -335,19 +373,64 @@ async def narrative_job() -> None:
     tickers = await get_active_tickers()
     n = len(tickers)
 
+    # ── Phase 1: Fetch articles ────────────────────────────────────────────
     async with httpx.AsyncClient(timeout=30) as client:
         await _fetch_all_tickers(fetch_narrative_signals, tickers, client, job_name="NARRATIVE")
+
+    fetch_elapsed = time.monotonic() - t_start
+
+    # ── Phase 2: Semantic clustering (Sprint 6, G-C6) ─────────────────────
+    from db.queries.raw_articles import count_unclustered_articles
+
+    t_cluster_start = time.monotonic()
+    total_clusters = 0
+    tickers_with_articles = 0
+
+    try:
+        total_articles = await count_unclustered_articles(since_hours=48.0)
+    except Exception as exc:
+        _log.warning("narrative_job: count_unclustered_articles failed: %s", exc)
+        total_articles = 0
+
+    for ticker in tickers:
+        try:
+            n_clusters = await cluster_articles(ticker)
+            total_clusters += n_clusters
+            if n_clusters > 0:
+                tickers_with_articles += 1
+        except Exception as exc:
+            _log.warning("narrative_job: cluster_articles(%s) failed: %s", ticker, exc)
+
+    cluster_elapsed = time.monotonic() - t_cluster_start
+
+    # ── Telemetry ──────────────────────────────────────────────────────────
+    telemetry = await _get_cluster_telemetry(since_hours=48.0)
+    _log.info(
+        "narrative_job dedup: total_articles_processed=%d total_clusters_formed=%d "
+        "cross_source_clusters=%d same_source_clusters=%d largest_cluster_size=%d "
+        "tickers_processed=%d elapsed_seconds=%.1f",
+        total_articles,
+        total_clusters,
+        telemetry["cross_source_clusters"],
+        telemetry["same_source_clusters"],
+        telemetry["largest_cluster_size"],
+        tickers_with_articles,
+        cluster_elapsed,
+    )
 
     await _record_run("narrative")
 
     elapsed = time.monotonic() - t_start
     print(
-        f"[NARRATIVE] fetch done in {_fmt_elapsed(elapsed)} — {n} tickers",
+        f"[NARRATIVE] fetch done in {_fmt_elapsed(fetch_elapsed)} — {n} tickers, "
+        f"cluster in {_fmt_elapsed(cluster_elapsed)} — {total_clusters} clusters",
         file=sys.stderr,
     )
     _log.info(
-        "narrative_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips",
-        n, elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        "narrative_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips, "
+        "%d clusters in %.1fs",
+        n, fetch_elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
+        total_clusters, cluster_elapsed,
     )
 
 

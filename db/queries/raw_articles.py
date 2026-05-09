@@ -96,7 +96,17 @@ async def get_articles_since(
     since: datetime,
 ) -> list[dict]:
     """
-    Return articles with provider_sentiment for scoring.
+    Return articles with provider_sentiment for scoring, deduplicated by
+    event cluster.
+
+    Dedup logic (Sprint 6, G-C6):
+      - Clustered articles (event_cluster_id IS NOT NULL): only the
+        highest-relevance article per cluster is returned.
+      - Unclustered articles (event_cluster_id IS NULL): each treated as
+        its own unique row via COALESCE(event_cluster_id, id::text).
+      - provider_sentiment IS NOT NULL is in the WHERE clause (before
+        DISTINCT ON) so Finnhub articles with NULL sentiment are excluded
+        from cluster selection entirely.
 
     Only rows where provider_sentiment IS NOT NULL are returned.
 
@@ -109,13 +119,65 @@ async def get_articles_since(
         rows = await conn.fetch(
             """
             SELECT published_at, provider_sentiment, relevance_score, source
-            FROM raw_articles
-            WHERE ticker               = $1
-              AND published_at        >= $2
-              AND provider_sentiment IS NOT NULL
+            FROM (
+                SELECT DISTINCT ON (COALESCE(event_cluster_id, id::text))
+                       published_at, provider_sentiment, relevance_score, source
+                FROM raw_articles
+                WHERE ticker               = $1
+                  AND published_at        >= $2
+                  AND provider_sentiment IS NOT NULL
+                ORDER BY COALESCE(event_cluster_id, id::text),
+                         relevance_score DESC NULLS LAST,
+                         published_at DESC
+            ) deduped
             ORDER BY published_at DESC
             """,
             ticker,
+            since,
+        )
+    return [dict(r) for r in rows]
+
+
+async def count_unclustered_articles(since_hours: float = 48.0) -> int:
+    """Count total unclustered articles across all tickers in the last N hours."""
+    since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        n = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM raw_articles
+            WHERE published_at >= $1
+              AND event_cluster_id IS NULL
+            """,
+            since,
+        )
+    return n or 0
+
+
+async def get_cluster_source_breakdown(since_hours: float = 48.0) -> list[dict]:
+    """
+    Return per-cluster source breakdown for recently clustered articles.
+
+    Used by narrative_job telemetry to compute cross_source vs same_source
+    cluster counts.
+
+    Returns list of dicts with keys: event_cluster_id, sources (array),
+    article_count.
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT event_cluster_id,
+                   array_agg(DISTINCT source) AS sources,
+                   COUNT(*) AS article_count
+            FROM raw_articles
+            WHERE event_cluster_id IS NOT NULL
+              AND published_at >= $1
+            GROUP BY event_cluster_id
+            HAVING COUNT(*) >= 2
+            """,
             since,
         )
     return [dict(r) for r in rows]
