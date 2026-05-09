@@ -74,7 +74,9 @@ class Freshness(BaseModel):
 
 class ProTierResponse(BaseModel):
     ticker:            str
-    score:             int
+    score:             int              # EMA-smoothed composite (with raw fallback)
+    score_raw:         Optional[int]    = None   # Unsmoothed composite
+    ema_obs_count:     Optional[int]    = None   # Monotonic EMA update counter
     label:             str
     confidence:        int
     sub_indices:       SubIndices
@@ -121,7 +123,8 @@ class HistorySubIndices(BaseModel):
 
 class HistoryEntry(BaseModel):
     timestamp:      datetime
-    score:          int
+    score:          int                       # Smoothed (with raw fallback for pre-EMA rows)
+    score_raw:      Optional[int]    = None   # Unsmoothed composite
     label:          str
     confidence:     int
     sub_indices:    HistorySubIndices
