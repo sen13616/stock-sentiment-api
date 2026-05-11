@@ -1,0 +1,135 @@
+"""
+pipeline/nlp/finbert.py
+
+FinBERT sentiment scoring for financial text articles.
+
+Paper Stage 3 (lines 1128–1132):
+    "Articles surviving validation and relevance filtering are passed through
+    FinBERT (ProsusAI/finbert), a transformer-based sentiment model fine-tuned
+    on financial text."
+
+Score formula (paper line 238):
+    S_i = P_i(positive) − P_i(negative)
+
+Produces a continuous score in [-1, +1] from the three-class softmax output.
+
+The model is loaded lazily on first call to avoid torch import at startup
+(same pattern as dedup.py for sentence-transformers).
+"""
+from __future__ import annotations
+
+import logging
+
+_log = logging.getLogger(__name__)
+
+_model = None
+_tokenizer = None
+
+_MODEL_NAME = "ProsusAI/finbert"
+
+# ProsusAI/finbert label order: positive=0, negative=1, neutral=2
+_POS_IDX = 0
+_NEG_IDX = 1
+_NEU_IDX = 2
+
+
+def _get_model():
+    """Load the FinBERT model and tokenizer on first use (~440 MB)."""
+    global _model, _tokenizer
+    if _model is None:
+        import torch  # noqa: PLC0415
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer  # noqa: PLC0415
+
+        _log.info("Loading FinBERT model '%s' …", _MODEL_NAME)
+        _tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
+        _model = AutoModelForSequenceClassification.from_pretrained(_MODEL_NAME)
+        _model.eval()
+        if torch.cuda.is_available():
+            _model = _model.cuda()
+            _log.info("FinBERT loaded on CUDA")
+        else:
+            _log.info("FinBERT loaded on CPU")
+    return _model, _tokenizer
+
+
+def score_text(text: str) -> dict:
+    """
+    Score a single text string with FinBERT.
+
+    Returns
+    -------
+    dict with keys: finbert_score, finbert_pos, finbert_neg, finbert_neu.
+    finbert_score = P(positive) - P(negative), range [-1, +1].
+    """
+    import torch  # noqa: PLC0415
+
+    model, tokenizer = _get_model()
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+    )
+    if next(model.parameters()).is_cuda:
+        inputs = {k: v.cuda() for k, v in inputs.items()}
+
+    with torch.no_grad():
+        logits = model(**inputs).logits
+    probs = torch.softmax(logits, dim=1).squeeze()
+
+    pos = probs[_POS_IDX].item()
+    neg = probs[_NEG_IDX].item()
+    neu = probs[_NEU_IDX].item()
+
+    return {
+        "finbert_score": pos - neg,
+        "finbert_pos": pos,
+        "finbert_neg": neg,
+        "finbert_neu": neu,
+    }
+
+
+def score_batch(texts: list[str]) -> list[dict]:
+    """
+    Score a batch of text strings with FinBERT.
+
+    Efficient for batches of 10–500 articles. Uses padding and processes
+    the full batch in a single forward pass.
+
+    Returns
+    -------
+    list of dicts, each with keys: finbert_score, finbert_pos, finbert_neg,
+    finbert_neu.
+    """
+    if not texts:
+        return []
+
+    import torch  # noqa: PLC0415
+
+    model, tokenizer = _get_model()
+    inputs = tokenizer(
+        texts,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+        padding=True,
+    )
+    if next(model.parameters()).is_cuda:
+        inputs = {k: v.cuda() for k, v in inputs.items()}
+
+    with torch.no_grad():
+        logits = model(**inputs).logits
+    probs = torch.softmax(logits, dim=1)
+
+    results = []
+    for i in range(len(texts)):
+        pos = probs[i][_POS_IDX].item()
+        neg = probs[i][_NEG_IDX].item()
+        neu = probs[i][_NEU_IDX].item()
+        results.append({
+            "finbert_score": pos - neg,
+            "finbert_pos": pos,
+            "finbert_neg": neg,
+            "finbert_neu": neu,
+        })
+    return results

@@ -154,9 +154,12 @@ class TestNanInfGuardsMarket:
 class TestNanInfGuardsNarrative:
     """score_narrative_signals should skip NaN/Inf sentiment values."""
 
-    def _art(self, sentiment, relevance=0.5) -> dict:
+    def _art(self, sentiment, relevance=0.7) -> dict:
         return {
-            "provider_sentiment": sentiment,
+            "finbert_score": sentiment,
+            "finbert_pos": max(0, sentiment) if sentiment is not None and not (isinstance(sentiment, float) and (math.isnan(sentiment) or math.isinf(sentiment))) else 0.5,
+            "finbert_neg": max(0, -sentiment) if sentiment is not None and not (isinstance(sentiment, float) and (math.isnan(sentiment) or math.isinf(sentiment))) else 0.3,
+            "finbert_neu": 0.2,
             "relevance_score": relevance,
             "source": "alpha_vantage",
             "published_at": _make_ts(),
@@ -226,91 +229,114 @@ class TestNanInfGuardsMacro:
 
 
 # ---------------------------------------------------------------------------
-# G-S13: Alpha Vantage source weight 1.0 → 0.7
+# G-S13 / Sprint A: Source weight reconciliation
 # ---------------------------------------------------------------------------
 
-class TestAVSourceWeight:
+class TestSourceWeights:
 
-    def test_alpha_vantage_weight_is_07(self):
-        assert _SOURCE_WEIGHTS["alpha_vantage"] == 0.7
+    def test_alpha_vantage_weight_is_075(self):
+        """Paper §Event-Level Weighting: AV = 0.75 (Sprint A)."""
+        assert _SOURCE_WEIGHTS["alpha_vantage"] == 0.75
+
+    def test_finnhub_weight_is_065(self):
+        """Paper §Event-Level Weighting: Finnhub = 0.65 (Sprint A)."""
+        assert _SOURCE_WEIGHTS["finnhub"] == 0.65
 
     def test_av_weight_lower_than_exchange_data(self):
         """AV is a third-party aggregator — weight should be lower than exchange data."""
         assert _SOURCE_WEIGHTS["alpha_vantage"] < _SOURCE_WEIGHTS["sec_edgar"]
 
-    def test_av_weight_same_as_default(self):
-        """AV weight (0.7) matches the default for unknown sources."""
-        from pipeline.features.normalize import _source_weight
-        assert _source_weight("alpha_vantage") == _source_weight("unknown_source")
+    def test_finnhub_lower_than_av(self):
+        """Per paper: Finnhub < AV in source hierarchy."""
+        assert _SOURCE_WEIGHTS["finnhub"] < _SOURCE_WEIGHTS["alpha_vantage"]
+
+    def test_sec_edgar_is_highest(self):
+        """SEC EDGAR at 1.0 — top of source hierarchy."""
+        assert _SOURCE_WEIGHTS["sec_edgar"] == 1.0
 
 
 # ---------------------------------------------------------------------------
-# G-S14: Minimum relevance threshold (0.1)
+# G-S14 / Sprint D / Sprint A: Relevance threshold 0.6 + finbert_score
 # ---------------------------------------------------------------------------
 
-class TestRelevanceFloor:
-    """Articles with relevance_score < 0.1 should be excluded entirely."""
+class TestRelevanceThreshold:
+    """Paper Stage 2: articles with relevance_score < 0.6 excluded.
+    Articles without explicit relevance_score excluded (not defaulted).
+    Sprint A: uses finbert_score instead of provider_sentiment."""
 
-    def _art(self, sentiment: float, relevance: float) -> dict:
+    def _art(self, sentiment: float, relevance) -> dict:
         return {
-            "provider_sentiment": sentiment,
+            "finbert_score": sentiment,
+            "finbert_pos": 0.7,
+            "finbert_neg": 0.1,
+            "finbert_neu": 0.2,
             "relevance_score": relevance,
             "source": "alpha_vantage",
             "published_at": _make_ts(),
         }
 
+    def test_above_threshold_included(self):
+        """relevance_score=0.65 → included (above 0.6)."""
+        result = score_narrative_signals("TEST", [self._art(0.5, 0.65)], _make_ts())
+        assert len(result) == 1
+
     def test_below_threshold_excluded(self):
-        """relevance_score=0.05 → excluded."""
-        result = score_narrative_signals("TEST", [self._art(0.5, 0.05)], _make_ts())
+        """relevance_score=0.55 → excluded (below 0.6)."""
+        result = score_narrative_signals("TEST", [self._art(0.5, 0.55)], _make_ts())
         assert len(result) == 0
 
-    def test_zero_relevance_defaults_to_05(self):
-        """relevance_score=0.0 → treated as unset, defaults to 0.5 (passes threshold).
-        Python truthy: float(0.0 or 0.5) = 0.5."""
-        result = score_narrative_signals("TEST", [self._art(0.5, 0.0)], _make_ts())
-        assert len(result) == 1
-
-    def test_at_threshold_included(self):
-        """relevance_score=0.1 → included (boundary: >= 0.1)."""
-        result = score_narrative_signals("TEST", [self._art(0.5, 0.1)], _make_ts())
-        assert len(result) == 1
-
-    def test_above_threshold_included(self):
-        """relevance_score=0.5 → included."""
-        result = score_narrative_signals("TEST", [self._art(0.5, 0.5)], _make_ts())
-        assert len(result) == 1
-
-    def test_none_relevance_uses_default_05(self):
-        """relevance_score=None → defaults to 0.5, which passes the threshold."""
+    def test_none_relevance_excluded(self):
+        """relevance_score=None → excluded (not defaulted to 0.5).
+        Paper Stage 2: articles without explicit relevance should not contribute."""
         art = {
-            "provider_sentiment": 0.5,
+            "finbert_score": 0.5,
+            "finbert_pos": 0.7,
+            "finbert_neg": 0.1,
+            "finbert_neu": 0.2,
             "relevance_score": None,
             "source": "alpha_vantage",
             "published_at": _make_ts(),
         }
         result = score_narrative_signals("TEST", [art], _make_ts())
+        assert len(result) == 0
+
+    def test_at_threshold_included(self):
+        """relevance_score=0.6 → included (boundary: >= 0.6)."""
+        result = score_narrative_signals("TEST", [self._art(0.5, 0.6)], _make_ts())
         assert len(result) == 1
 
-    def test_relevance_no_longer_floored_in_weight(self):
-        """After G-S14, weight uses relevance directly (no max(relevance, 0.1) floor),
-        because sub-threshold articles are already excluded."""
-        art = self._art(0.5, 0.15)
-        result = score_narrative_signals("TEST", [art], _make_ts())
+    def test_just_below_threshold_excluded(self):
+        """relevance_score=0.59 → excluded."""
+        result = score_narrative_signals("TEST", [self._art(0.5, 0.59)], _make_ts())
+        assert len(result) == 0
+
+    def test_high_relevance_included(self):
+        """relevance_score=1.0 → included."""
+        result = score_narrative_signals("TEST", [self._art(0.5, 1.0)], _make_ts())
         assert len(result) == 1
-        # Weight should use relevance=0.15 directly, not max(0.15, 0.1)=0.15
-        # (same result in this case, but the code path is different)
-        # The key check: a relevance of 0.5 should produce a higher weight than 0.15
-        art2 = self._art(0.5, 0.5)
-        result2 = score_narrative_signals("TEST", [art2], _make_ts())
-        assert result2[0]["weight"] > result[0]["weight"]
+
+    def test_zero_relevance_excluded(self):
+        """relevance_score=0.0 → excluded (below 0.6)."""
+        result = score_narrative_signals("TEST", [self._art(0.5, 0.0)], _make_ts())
+        assert len(result) == 0
+
+    def test_relevance_used_directly_in_weight(self):
+        """Weight uses relevance directly — higher relevance = higher weight."""
+        art_low = self._art(0.5, 0.65)
+        art_high = self._art(0.5, 0.95)
+        result_low = score_narrative_signals("TEST", [art_low], _make_ts())
+        result_high = score_narrative_signals("TEST", [art_high], _make_ts())
+        assert len(result_low) == 1
+        assert len(result_high) == 1
+        assert result_high[0]["weight"] > result_low[0]["weight"]
 
     def test_mixed_articles_filter(self):
         """Mix of above and below threshold — only above-threshold articles scored."""
         articles = [
-            self._art(0.8, 0.05),   # excluded
-            self._art(0.5, 0.3),    # included
-            self._art(-0.2, 0.01),  # excluded
-            self._art(0.1, 0.5),    # included
+            self._art(0.8, 0.05),   # excluded (well below 0.6)
+            self._art(0.5, 0.7),    # included (above 0.6)
+            self._art(-0.2, 0.55),  # excluded (below 0.6)
+            self._art(0.1, 0.8),    # included (above 0.6)
         ]
         result = score_narrative_signals("TEST", articles, _make_ts())
         assert len(result) == 2

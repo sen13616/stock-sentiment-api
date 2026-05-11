@@ -144,9 +144,9 @@ class TestBuildWithHalfLives:
         """Narrative signal 12h old → weight ≈ 0.5 × source_weight."""
         now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
         ts = now - timedelta(hours=12)
-        sig = _build("provider_sentiment", 0.3, 65.0, "alpha_vantage", ts,
+        sig = _build("finbert_sentiment", 0.3, 65.0, "alpha_vantage", ts,
                       "narrative", "AAPL", now)
-        expected_w = 0.7 * 0.5  # AV source weight = 0.7
+        expected_w = 0.75 * 0.5  # AV source weight = 0.75 (Sprint A)
         assert abs(sig["weight"] - expected_w) < 0.01
 
     def test_influencer_sec_edgar_uses_168h(self):
@@ -164,7 +164,7 @@ class TestBuildWithHalfLives:
         ts = now - timedelta(days=3)
         sig = _build("analyst_buy_pct", 0.7, 60.0, "finnhub", ts,
                       "influencer", "AAPL", now)
-        expected_w = 0.8 * 0.5  # finnhub source weight = 0.8
+        expected_w = 0.65 * 0.5  # finnhub source weight = 0.65 (Sprint A)
         assert abs(sig["weight"] - expected_w) < 0.01
 
     def test_macro_signal_uses_336h(self):

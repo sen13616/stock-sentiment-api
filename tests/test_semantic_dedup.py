@@ -308,32 +308,32 @@ class TestGetArticlesSinceDedup:
         assert "COALESCE(event_cluster_id" in source, "must use COALESCE for NULL cluster IDs"
         assert "relevance_score DESC" in source, "must order by relevance_score DESC to pick highest"
 
-    async def test_finnhub_higher_relevance_excluded_av_returned(self):
+    async def test_unscored_articles_excluded_before_distinct(self):
         """
-        Edge case: a cluster of 2 articles where Finnhub has higher relevance
-        but NULL provider_sentiment, AV has lower relevance with sentiment.
+        Edge case: a cluster of 2 articles where one has higher relevance
+        but NULL finbert_score (unscored).
 
-        The provider_sentiment IS NOT NULL filter MUST be in WHERE (before
-        DISTINCT ON) so the Finnhub article is excluded from selection entirely,
-        letting the AV article win.
+        The finbert_score IS NOT NULL filter MUST be in WHERE (before
+        DISTINCT ON) so unscored articles are excluded from selection
+        entirely, letting the scored article win.
 
         This test verifies the SQL ordering: WHERE filters first, then DISTINCT ON
-        picks from the remaining (sentiment-bearing) rows.
+        picks from the remaining (FinBERT-scored) rows.
         """
         from db.queries.raw_articles import get_articles_since
         import inspect
         source = inspect.getsource(get_articles_since)
 
-        # The WHERE clause must contain provider_sentiment IS NOT NULL
-        # This ensures Finnhub articles (NULL sentiment) are excluded BEFORE
+        # The WHERE clause must contain finbert_score IS NOT NULL
+        # This ensures unscored articles are excluded BEFORE
         # DISTINCT ON picks the "best" article per cluster.
-        assert "provider_sentiment IS NOT NULL" in source, (
-            "provider_sentiment filter must be in WHERE clause (before DISTINCT ON)"
+        assert "finbert_score IS NOT NULL" in source, (
+            "finbert_score filter must be in WHERE clause (before DISTINCT ON)"
         )
 
         # Verify it's NOT in a HAVING clause or subquery wrapper
         assert "HAVING" not in source.upper(), (
-            "provider_sentiment filter must NOT be in HAVING — must be in WHERE"
+            "finbert_score filter must NOT be in HAVING — must be in WHERE"
         )
 
     async def test_query_returns_expected_columns(self):
@@ -342,7 +342,8 @@ class TestGetArticlesSinceDedup:
         import inspect
         source = inspect.getsource(get_articles_since)
         # Must select these columns for score_narrative_signals compatibility
-        for col in ("published_at", "provider_sentiment", "relevance_score", "source"):
+        for col in ("published_at", "finbert_score", "relevance_score", "source",
+                     "finbert_pos", "finbert_neg", "finbert_neu"):
             assert col in source, f"get_articles_since must SELECT {col}"
 
 
@@ -487,17 +488,18 @@ class TestScoringWithDedup:
         from pipeline.features.normalize import score_narrative_signals
 
         # Simulate: 3 articles about the same event, varying relevance
+        # Sprint A: uses finbert_score + finbert class probabilities
         all_three = [
-            {"published_at": _NOW, "provider_sentiment": 0.5, "relevance_score": 0.3, "source": "alpha_vantage"},
-            {"published_at": _NOW - timedelta(hours=1), "provider_sentiment": 0.6, "relevance_score": 0.8, "source": "alpha_vantage"},
-            {"published_at": _NOW - timedelta(hours=2), "provider_sentiment": 0.4, "relevance_score": 0.5, "source": "alpha_vantage"},
+            {"published_at": _NOW, "finbert_score": 0.5, "finbert_pos": 0.7, "finbert_neg": 0.2, "finbert_neu": 0.1, "relevance_score": 0.65, "source": "alpha_vantage"},
+            {"published_at": _NOW - timedelta(hours=1), "finbert_score": 0.6, "finbert_pos": 0.75, "finbert_neg": 0.15, "finbert_neu": 0.1, "relevance_score": 0.9, "source": "alpha_vantage"},
+            {"published_at": _NOW - timedelta(hours=2), "finbert_score": 0.4, "finbert_pos": 0.6, "finbert_neg": 0.2, "finbert_neu": 0.2, "relevance_score": 0.7, "source": "alpha_vantage"},
         ]
 
         # Without dedup: all 3 scored
         sigs_all = score_narrative_signals("AAPL", all_three, _NOW)
 
-        # With dedup: only the highest-relevance article (0.8) passes through
-        deduped = [all_three[1]]  # relevance 0.8
+        # With dedup: only the highest-relevance article (0.9) passes through
+        deduped = [all_three[1]]  # relevance 0.9
         sigs_deduped = score_narrative_signals("AAPL", deduped, _NOW)
 
         assert len(sigs_all) == 3

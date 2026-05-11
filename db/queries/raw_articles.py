@@ -36,6 +36,7 @@ async def insert_article(
     provider_sentiment: float | None,
     relevance_score: float | None,
     content_hash: str,
+    language: str | None = None,
 ) -> None:
     """
     Insert one article row. Silently ignores duplicates via ON CONFLICT DO NOTHING
@@ -47,8 +48,8 @@ async def insert_article(
             """
             INSERT INTO raw_articles
                 (ticker, title, summary, source, source_url, published_at,
-                 provider_sentiment, relevance_score, content_hash)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 provider_sentiment, relevance_score, content_hash, language)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (ticker, content_hash) DO NOTHING
             """,
             ticker,
@@ -60,6 +61,7 @@ async def insert_article(
             provider_sentiment,
             relevance_score,
             content_hash,
+            language,
         )
 
 
@@ -96,36 +98,38 @@ async def get_articles_since(
     since: datetime,
 ) -> list[dict]:
     """
-    Return articles with provider_sentiment for scoring, deduplicated by
-    event cluster.
+    Return FinBERT-scored articles for scoring, deduplicated by event cluster.
 
     Dedup logic (Sprint 6, G-C6):
       - Clustered articles (event_cluster_id IS NOT NULL): only the
         highest-relevance article per cluster is returned.
       - Unclustered articles (event_cluster_id IS NULL): each treated as
         its own unique row via COALESCE(event_cluster_id, id::text).
-      - provider_sentiment IS NOT NULL is in the WHERE clause (before
-        DISTINCT ON) so Finnhub articles with NULL sentiment are excluded
-        from cluster selection entirely.
+      - finbert_score IS NOT NULL is in the WHERE clause (before
+        DISTINCT ON) so unscored articles are excluded from cluster
+        selection entirely.
 
-    Only rows where provider_sentiment IS NOT NULL are returned.
+    Only rows where finbert_score IS NOT NULL are returned (Sprint A).
 
     Returns
     -------
-    list of dicts with keys: published_at, provider_sentiment, relevance_score, source.
+    list of dicts with keys: published_at, finbert_score, relevance_score,
+    source, finbert_pos, finbert_neg, finbert_neu.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT published_at, provider_sentiment, relevance_score, source
+            SELECT published_at, finbert_score, relevance_score, source,
+                   finbert_pos, finbert_neg, finbert_neu
             FROM (
                 SELECT DISTINCT ON (COALESCE(event_cluster_id, id::text))
-                       published_at, provider_sentiment, relevance_score, source
+                       published_at, finbert_score, relevance_score, source,
+                       finbert_pos, finbert_neg, finbert_neu
                 FROM raw_articles
-                WHERE ticker               = $1
-                  AND published_at        >= $2
-                  AND provider_sentiment IS NOT NULL
+                WHERE ticker            = $1
+                  AND published_at     >= $2
+                  AND finbert_score IS NOT NULL
                 ORDER BY COALESCE(event_cluster_id, id::text),
                          relevance_score DESC NULLS LAST,
                          published_at DESC
@@ -197,4 +201,61 @@ async def set_cluster_ids(article_ids: list[int], cluster_id: str) -> None:
             """,
             cluster_id,
             article_ids,
+        )
+
+
+async def get_unscored_articles(
+    since_hours: float = 48.0,
+    language: str = "en",
+) -> list[dict]:
+    """
+    Return articles that have not yet been scored by FinBERT.
+
+    Filters to the specified language (default: English) and returns
+    articles where finbert_score IS NULL.
+
+    Returns list of dicts with keys: id, title, summary, source.
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, summary, source
+            FROM raw_articles
+            WHERE published_at    >= $1
+              AND finbert_score IS NULL
+              AND language         = $2
+            ORDER BY published_at ASC
+            """,
+            since,
+            language,
+        )
+    return [dict(r) for r in rows]
+
+
+async def update_finbert_scores(
+    rows: list[tuple[int, float, float, float, float]],
+) -> None:
+    """
+    Batch-update FinBERT scores for articles by ID.
+
+    Parameters
+    ----------
+    rows : list of (id, finbert_score, finbert_pos, finbert_neg, finbert_neu)
+    """
+    if not rows:
+        return
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            UPDATE raw_articles
+            SET finbert_score = $2,
+                finbert_pos   = $3,
+                finbert_neg   = $4,
+                finbert_neu   = $5
+            WHERE id = $1
+            """,
+            rows,
         )

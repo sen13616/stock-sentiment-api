@@ -361,9 +361,10 @@ async def narrative_job() -> None:
     """
     Narrative layer job — every 30 minutes.
 
-    Two phases:
+    Three phases:
       1. Fetch: ingests news articles from AV + Finnhub for all tickers (data-only).
       2. Cluster: runs semantic dedup (Stage 2) on unclustered articles per ticker.
+      3. FinBERT: scores unscored English articles with ProsusAI/finbert (Sprint A).
 
     Scoring is handled by the global scoring_tick_job.
     """
@@ -418,19 +419,51 @@ async def narrative_job() -> None:
         cluster_elapsed,
     )
 
+    # ── Phase 3: FinBERT scoring (Sprint A) ───────────────────────────────
+    from db.queries.raw_articles import get_unscored_articles, update_finbert_scores
+    from pipeline.nlp.finbert import score_batch as finbert_score_batch
+
+    t_finbert_start = time.monotonic()
+    n_scored = 0
+
+    try:
+        unscored = await get_unscored_articles(since_hours=48.0, language="en")
+        if unscored:
+            texts = [
+                (a["title"] or "") + " " + (a["summary"] or "")
+                for a in unscored
+            ]
+            scores = finbert_score_batch(texts)
+            rows = [
+                (a["id"], s["finbert_score"], s["finbert_pos"],
+                 s["finbert_neg"], s["finbert_neu"])
+                for a, s in zip(unscored, scores)
+            ]
+            await update_finbert_scores(rows)
+            n_scored = len(rows)
+    except Exception as exc:
+        _log.error("narrative_job: FinBERT scoring failed: %s", exc, exc_info=True)
+
+    finbert_elapsed = time.monotonic() - t_finbert_start
+    _log.info(
+        "narrative_job finbert: scored=%d elapsed_seconds=%.1f",
+        n_scored, finbert_elapsed,
+    )
+
     await _record_run("narrative")
 
     elapsed = time.monotonic() - t_start
     print(
-        f"[NARRATIVE] fetch done in {_fmt_elapsed(fetch_elapsed)} — {n} tickers, "
-        f"cluster in {_fmt_elapsed(cluster_elapsed)} — {total_clusters} clusters",
+        f"[NARRATIVE] fetch {_fmt_elapsed(fetch_elapsed)} — {n} tickers, "
+        f"cluster {_fmt_elapsed(cluster_elapsed)} — {total_clusters} clusters, "
+        f"finbert {_fmt_elapsed(finbert_elapsed)} — {n_scored} scored",
         file=sys.stderr,
     )
     _log.info(
         "narrative_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips, "
-        "%d clusters in %.1fs",
+        "%d clusters in %.1fs, %d finbert-scored in %.1fs",
         n, fetch_elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
-        total_clusters, cluster_elapsed,
+        total_clusters, cluster_elapsed, n_scored, finbert_elapsed,
     )
 
 

@@ -9,12 +9,14 @@ Sources
 Primary:  Alpha Vantage NEWS_SENTIMENT
           Returns title, summary, source, URL, provider_sentiment, relevance_score.
 
-Fallback: Finnhub /company-news
+Secondary: Finnhub /company-news
           Returns title, summary, URL, published_at.
           No provider sentiment — stored with provider_sentiment=None.
+          relevance_score=1.0 per paper Stage 2 (ticker-keyed endpoint).
 
-Phase 1 note: FinBERT scoring is NOT applied here.  The finbert_score column
-is left NULL and will be populated in Phase 2.
+Language detection (Sprint A): langdetect is run on title+summary at
+ingestion time, storing the detected language in raw_articles.language.
+FinBERT scoring (Phase 3 of narrative_job) filters on language='en'.
 """
 from __future__ import annotations
 
@@ -25,6 +27,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from dotenv import load_dotenv
+
+from langdetect import detect, LangDetectException
 
 from db.queries.raw_articles import hash_exists, insert_article
 from pipeline.rate_limits import (
@@ -49,6 +53,16 @@ _ARTICLE_LOOKBACK_DAYS = 3   # fetch news from the last N days
 def _hash_url(url: str) -> str:
     """SHA-256 of the article URL, hex-encoded (64 chars)."""
     return hashlib.sha256(url.encode()).hexdigest()
+
+
+def _detect_language(text: str) -> str | None:
+    """Detect language of text using langdetect. Returns ISO 639-1 code or None."""
+    if not text or len(text.strip()) < 20:
+        return None
+    try:
+        return detect(text)
+    except LangDetectException:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +198,7 @@ async def _fetch_finnhub_news(ticker: str, client: httpx.AsyncClient) -> list[di
             "source_url":         url,
             "published_at":       published_at,
             "provider_sentiment": None,
-            "relevance_score":    None,
+            "relevance_score":    1.0,  # Paper Stage 2: ticker-keyed endpoint → w_rel=1.0
             "content_hash":       _hash_url(url),
         })
 
@@ -219,6 +233,10 @@ async def _run_narrative(ticker: str, client: httpx.AsyncClient) -> None:
             _log.warning("hash_exists error for %s: %s", ticker, exc)
             continue
 
+        # Detect language at ingestion for FinBERT English-only filter
+        text_for_lang = (article["title"] or "") + " " + (article["summary"] or "")
+        language = _detect_language(text_for_lang)
+
         try:
             await insert_article(
                 ticker             = article["ticker"],
@@ -230,6 +248,7 @@ async def _run_narrative(ticker: str, client: httpx.AsyncClient) -> None:
                 provider_sentiment = article["provider_sentiment"],
                 relevance_score    = article["relevance_score"],
                 content_hash       = article["content_hash"],
+                language           = language,
             )
         except Exception as exc:
             _log.warning("insert_article error for %s: %s", ticker, exc)

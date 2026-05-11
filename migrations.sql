@@ -37,6 +37,10 @@ CREATE TABLE raw_articles (
     content_hash        VARCHAR(64),
     event_cluster_id    VARCHAR(100),
     finbert_score       FLOAT,
+    finbert_pos         FLOAT,
+    finbert_neg         FLOAT,
+    finbert_neu         FLOAT,
+    language            VARCHAR(10),
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 

@@ -39,10 +39,10 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SOURCE_WEIGHTS: dict[str, float] = {
-    "alpha_vantage": 0.7,
+    "alpha_vantage": 0.75,   # Paper §Event-Level Weighting (Sprint A)
     "polygon":       0.9,
     "sec_edgar":     1.0,
-    "finnhub":       0.8,
+    "finnhub":       0.65,   # Paper §Event-Level Weighting (Sprint A)
     "computed":      0.85,
     # Removed Stage 1 — "newsapi" excluded from paper's implemented methodology. See docs/SIGNAL_CATALOG.md.
     "yfinance":      0.9,
@@ -419,40 +419,91 @@ async def score_market_signals(
     return result
 
 
+def _compute_w_conf(pos: float, neg: float, neu: float) -> float:
+    """
+    Compute confidence weight from FinBERT class probabilities.
+
+    Paper §Event-Level Weighting:
+        w_conf = 1 − (−Σ P_i(k) ln P_i(k)) / ln(3)
+
+    Inverse normalized entropy of the 3-class output.  When one class
+    dominates (e.g. 0.92, 0.05, 0.03), w_conf ≈ 0.74.  When probabilities
+    are spread evenly (0.33, 0.33, 0.33), w_conf ≈ 0.
+
+    Returns float in [0, 1].  Returns 0.0 if any probability is invalid.
+    """
+    probs = [pos, neg, neu]
+    if any(p < 0 for p in probs):
+        return 0.0
+    total = sum(probs)
+    if total < 1e-9:
+        return 0.0
+
+    entropy = 0.0
+    for p in probs:
+        if p > 0:
+            entropy -= p * math.log(p)
+
+    ln3 = math.log(3)
+    w_conf = 1.0 - entropy / ln3
+    return max(0.0, min(1.0, w_conf))
+
+
 def score_narrative_signals(
     ticker: str,
     articles: list[dict],
     now: datetime,
 ) -> list[dict]:
     """
-    Convert raw_articles rows (with provider_sentiment) to scored dicts.
+    Convert raw_articles rows (with finbert_score) to scored dicts.
+
+    Sprint A: uses finbert_score (FinBERT S_i = P(pos) - P(neg)) instead of
+    provider_sentiment.  Weight formula now includes w_conf from FinBERT class
+    probabilities per paper §Event-Level Weighting:
+        w_i = w_src · w_rel · w_conf · e^(−λΔt_i)
 
     Parameters
     ----------
     articles : rows from get_articles_since() — keys: published_at,
-               provider_sentiment, relevance_score, source.
+               finbert_score, relevance_score, source, finbert_pos,
+               finbert_neg, finbert_neu.
     """
     result: list[dict] = []
     for art in articles:
-        sentiment = art.get("provider_sentiment")
+        sentiment = art.get("finbert_score")
         if sentiment is None:
             continue
         sent_f = float(sentiment)
         if math.isnan(sent_f) or math.isinf(sent_f):
             continue
-        relevance = float(art.get("relevance_score") or 0.5)
-        if relevance < 0.1:
-            continue
+        # Sprint D: explicit None check + 0.6 threshold (paper Stage 2)
+        relevance_raw = art.get("relevance_score")
+        if relevance_raw is None:
+            continue  # Paper Stage 2: exclude articles without explicit relevance
+        relevance = float(relevance_raw)
+        if relevance < 0.6:
+            continue  # Paper Stage 2: direct narrative threshold
         source    = art.get("source", "news")
         published = art["published_at"]
 
         score  = max(0.0, min(100.0, 50.0 + 50.0 * sent_f))
         half_life = _get_half_life("narrative", source)
         w_time = _time_weight(published, now, half_life)
-        weight = _source_weight(source) * w_time * relevance
+
+        # w_conf from FinBERT class probabilities (paper §Event-Level Weighting)
+        pos = art.get("finbert_pos")
+        neg = art.get("finbert_neg")
+        neu = art.get("finbert_neu")
+        if pos is not None and neg is not None and neu is not None:
+            w_conf = _compute_w_conf(float(pos), float(neg), float(neu))
+        else:
+            w_conf = 1.0  # Fallback: treat as fully confident if no probs available
+
+        # Paper formula: w_i = w_src · w_rel · w_conf · e^(−λΔt_i)
+        weight = _source_weight(source) * w_time * relevance * w_conf
 
         result.append({
-            "signal_type": "provider_sentiment",
+            "signal_type": "finbert_sentiment",
             "value":       float(sentiment),
             "score":       round(score, 2),
             "weight":      round(max(weight, 1e-6), 6),
