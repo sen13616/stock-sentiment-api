@@ -66,12 +66,24 @@ _LAYER_HALF_LIFE_H: dict[str, float] = {
 
 # Overrides for specific (layer, source) combinations
 _HALF_LIFE_OVERRIDE: dict[tuple[str, str], float] = {
-    ("influencer", "sec_edgar"): 168.0,   # SEC filings: 7 days
+    ("influencer", "sec_edgar"): 168.0,   # SEC filings: 7 days (provider-keyed; superseded by signal-type override below for insider rows)
+}
+
+# Influencer-layer signal-type overrides (Sprint P3.1, paper §Event-Level Weighting).
+# Paper specifies half-life by *signal channel*, not data provider. Takes precedence
+# over the (layer, source) table above.
+_INFLUENCER_SIGNAL_HALF_LIFE_H: dict[str, float] = {
+    "insider_net_shares": 168.0,   # Paper: insider transactions = 7 days regardless of provider
+    # analyst_buy_pct, analyst_target_price, earnings_estimate_revision use 72h layer default
 }
 
 
-def _get_half_life(layer: str, source: str) -> float:
-    """Look up half-life for a (layer, source) combination."""
+def _get_half_life(layer: str, source: str, signal_type: str | None = None) -> float:
+    """Look up half-life. Priority: (layer, signal_type) → (layer, source) → layer default."""
+    if signal_type is not None and layer == "influencer":
+        sig_hl = _INFLUENCER_SIGNAL_HALF_LIFE_H.get(signal_type)
+        if sig_hl is not None:
+            return sig_hl
     return _HALF_LIFE_OVERRIDE.get(
         (layer, source.lower()),
         _LAYER_HALF_LIFE_H.get(layer, 48.0),
@@ -89,6 +101,41 @@ def _time_weight(ts: datetime, now: datetime, half_life_h: float = 48.0) -> floa
 
 def _source_weight(source: str) -> float:
     return _SOURCE_WEIGHTS.get(source.lower(), 0.70)
+
+
+# Influencer-layer signal-type weight overrides (Sprint P3.1, paper §Event-Level Weighting).
+# Paper specifies w_src by signal channel (insider / analyst-consensus / target-price /
+# earnings-revisions), not by data provider. Takes precedence over `_SOURCE_WEIGHTS`
+# when layer == "influencer".
+_INFLUENCER_SIGNAL_WEIGHT: dict[str, float] = {
+    "insider_net_shares":         1.00,   # Paper: insider transactions
+    "analyst_buy_pct":            0.85,   # Paper: analyst consensus
+    "analyst_target_price":       0.85,   # Paper: analyst target price
+    "earnings_estimate_revision": 0.80,   # Paper: earnings revisions (signal lands in P3.3)
+}
+
+# Influencer event-weight scaffolds (Sprint P3.1, paper §Event-Level Weighting).
+# w_author = 1.00 uniformly today; scaffold for the deferred role-based hierarchy
+# (CEO → CFO → Director …) which the paper places in Future Additions.
+# w_conf  = 1.00 explicitly for non-textual influencer signals — paper: "Model
+# confidence w_conf does not apply to non-textual signals and is set to 1.00
+# throughout".
+_INFLUENCER_W_AUTHOR: float = 1.0
+_INFLUENCER_W_CONF:   float = 1.0
+
+
+def _get_signal_weight(layer: str, source: str, signal_type: str) -> float:
+    """Return w_src for a signal.
+
+    For influencer layer, paper specifies weights keyed by signal channel rather
+    than provider; the channel weight takes precedence. Other layers fall through
+    to the per-source table.
+    """
+    if layer == "influencer":
+        sig_w = _INFLUENCER_SIGNAL_WEIGHT.get(signal_type)
+        if sig_w is not None:
+            return sig_w
+    return _source_weight(source)
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +381,13 @@ def _build(
     ticker: str,
     now: datetime,
 ) -> dict:
-    half_life = _get_half_life(layer, source)
-    w = _source_weight(source) * _time_weight(timestamp, now, half_life)
+    half_life = _get_half_life(layer, source, signal_type)
+    w_src = _get_signal_weight(layer, source, signal_type)
+    w = w_src * _time_weight(timestamp, now, half_life)
+    if layer == "influencer":
+        # Paper §Event-Level Weighting: w_i = w_src · w_author · w_conf · e^(−λΔt)
+        # Both scaffolds are uniform 1.0 today (see _INFLUENCER_W_AUTHOR / _CONF).
+        w = w * _INFLUENCER_W_AUTHOR * _INFLUENCER_W_CONF
     return {
         "signal_type": signal_type,
         "value":       value,

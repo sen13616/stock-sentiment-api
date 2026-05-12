@@ -150,21 +150,25 @@ class TestBuildWithHalfLives:
         assert abs(sig["weight"] - expected_w) < 0.01
 
     def test_influencer_sec_edgar_uses_168h(self):
-        """SEC filing 7 days old → weight ≈ 0.5 × source_weight."""
+        """SEC-filed insider transaction 7 days old → weight ≈ 0.5 × channel_weight (1.00)."""
         now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
         ts = now - timedelta(days=7)
         sig = _build("insider_net_shares", 1000, 55.0, "sec_edgar", ts,
                       "influencer", "AAPL", now)
-        expected_w = 1.0 * 0.5  # sec_edgar source weight = 1.0
+        # Sprint P3.1 I1: insider channel weight = 1.00; half-life override 168h applies.
+        # w_author × w_conf = 1.0 × 1.0 (Sprint P3.1 I7/I15 scaffolds).
+        expected_w = 1.0 * 0.5
         assert abs(sig["weight"] - expected_w) < 0.01
 
-    def test_influencer_finnhub_uses_72h(self):
-        """Finnhub analyst signal 3 days old → weight ≈ 0.5 × source_weight."""
+    def test_influencer_analyst_consensus_uses_paper_weight(self):
+        """Sprint P3.1 I2: analyst_buy_pct uses paper channel weight 0.85 regardless of provider."""
         now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
         ts = now - timedelta(days=3)
         sig = _build("analyst_buy_pct", 0.7, 60.0, "finnhub", ts,
                       "influencer", "AAPL", now)
-        expected_w = 0.65 * 0.5  # finnhub source weight = 0.65 (Sprint A)
+        # P3.1 I2: analyst consensus channel weight = 0.85 (was 0.65 via finnhub source).
+        # Half-life: 72h layer default; t=3d → 0.5 decay.
+        expected_w = 0.85 * 0.5
         assert abs(sig["weight"] - expected_w) < 0.01
 
     def test_macro_signal_uses_336h(self):
@@ -196,3 +200,122 @@ class TestHalfLifeValues:
 
     def test_sec_edgar_override_is_168h(self):
         assert _HALF_LIFE_OVERRIDE[("influencer", "sec_edgar")] == 168.0
+
+
+# ===========================================================================
+# Sprint P3.1 — Influencer signal-channel weights, half-lives, w_author scaffold
+# ===========================================================================
+
+class TestInfluencerSignalChannelWeights:
+    """Sprint P3.1 — paper §Event-Level Weighting: w_src keyed by signal channel."""
+
+    def test_insider_channel_weight_is_100(self):
+        """I1: insider transactions get w_src = 1.00 regardless of provider."""
+        from pipeline.features.normalize import _get_signal_weight
+        assert _get_signal_weight("influencer", "finnhub", "insider_net_shares") == 1.00
+        assert _get_signal_weight("influencer", "sec_edgar", "insider_net_shares") == 1.00
+
+    def test_analyst_consensus_weight_is_085(self):
+        """I2: analyst consensus channel weight = 0.85."""
+        from pipeline.features.normalize import _get_signal_weight
+        assert _get_signal_weight("influencer", "finnhub", "analyst_buy_pct") == 0.85
+
+    def test_analyst_target_price_weight_is_085(self):
+        """I2: analyst target price channel weight = 0.85."""
+        from pipeline.features.normalize import _get_signal_weight
+        assert _get_signal_weight("influencer", "yfinance", "analyst_target_price") == 0.85
+        assert _get_signal_weight("influencer", "finnhub", "analyst_target_price") == 0.85
+
+    def test_earnings_revision_weight_is_080(self):
+        """I3 (rolled into P3.1): earnings revision channel weight = 0.80."""
+        from pipeline.features.normalize import _get_signal_weight
+        assert _get_signal_weight("influencer", "yfinance", "earnings_estimate_revision") == 0.80
+
+    def test_non_influencer_falls_through_to_source_weight(self):
+        """Channel-weight override applies only to the influencer layer."""
+        from pipeline.features.normalize import _SOURCE_WEIGHTS, _get_signal_weight
+        # Market layer with a name that exists in influencer table: still uses source weight.
+        assert _get_signal_weight("market", "yfinance", "insider_net_shares") == _SOURCE_WEIGHTS["yfinance"]
+        assert _get_signal_weight("narrative", "alpha_vantage", "analyst_buy_pct") == _SOURCE_WEIGHTS["alpha_vantage"]
+
+    def test_unknown_influencer_signal_type_falls_through(self):
+        """Influencer signal not in channel table falls through to source weight."""
+        from pipeline.features.normalize import _SOURCE_WEIGHTS, _get_signal_weight
+        assert _get_signal_weight("influencer", "finnhub", "unknown_signal") == _SOURCE_WEIGHTS["finnhub"]
+
+
+class TestInfluencerInsiderHalfLife:
+    """Sprint P3.1 I4: insider transactions get 168h half-life regardless of provider."""
+
+    def test_insider_finnhub_uses_168h(self):
+        """Finnhub-sourced insider rows now get 168h, not 72h layer default."""
+        assert _get_half_life("influencer", "finnhub", "insider_net_shares") == 168.0
+
+    def test_insider_sec_edgar_uses_168h(self):
+        """SEC EDGAR insider rows still 168h (now via signal-type override; source override still present harmlessly)."""
+        assert _get_half_life("influencer", "sec_edgar", "insider_net_shares") == 168.0
+
+    def test_analyst_buy_pct_still_72h(self):
+        """Analyst consensus uses 72h layer default."""
+        assert _get_half_life("influencer", "finnhub", "analyst_buy_pct") == 72.0
+
+    def test_analyst_target_still_72h(self):
+        """Analyst target price uses 72h layer default."""
+        assert _get_half_life("influencer", "yfinance", "analyst_target_price") == 72.0
+
+    def test_insider_finnhub_build_weight_uses_168h(self):
+        """End-to-end: _build for Finnhub insider with 7d age → ≈ 0.5 × 1.0 channel_weight."""
+        now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+        ts = now - timedelta(days=7)
+        sig = _build("insider_net_shares", 1000, 55.0, "finnhub", ts,
+                     "influencer", "AAPL", now)
+        # Channel weight 1.00 (P3.1 I1), half-life 168h (P3.1 I4), 7d age → time decay 0.5
+        expected_w = 1.0 * 0.5
+        assert abs(sig["weight"] - expected_w) < 0.01
+
+
+class TestInfluencerEventWeightScaffolds:
+    """Sprint P3.1 I7 + I15: w_author and w_conf scaffolds wired into _build()."""
+
+    def test_w_author_constant_is_one(self):
+        """w_author = 1.00 scaffold; role-based hierarchy deferred to Future Additions."""
+        from pipeline.features.normalize import _INFLUENCER_W_AUTHOR
+        assert _INFLUENCER_W_AUTHOR == 1.0
+
+    def test_w_conf_constant_is_one(self):
+        """w_conf = 1.00 explicitly for non-textual influencer signals (paper)."""
+        from pipeline.features.normalize import _INFLUENCER_W_CONF
+        assert _INFLUENCER_W_CONF == 1.0
+
+    def test_build_applies_scaffolds_to_influencer_layer(self):
+        """w_author and w_conf are multiplied into weight for influencer layer."""
+        # With both scaffolds at 1.0 the numeric weight is unchanged; this test
+        # asserts the scaffolds *are present* by monkey-patching one to a non-unity
+        # value and confirming the weight scales.
+        import pipeline.features.normalize as nm
+        now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+        ts = now  # zero age → time decay 1.0
+        baseline = nm._build("analyst_buy_pct", 0.7, 60.0, "finnhub", ts,
+                             "influencer", "AAPL", now)
+        original = nm._INFLUENCER_W_AUTHOR
+        try:
+            nm._INFLUENCER_W_AUTHOR = 0.5
+            scaled = nm._build("analyst_buy_pct", 0.7, 60.0, "finnhub", ts,
+                               "influencer", "AAPL", now)
+        finally:
+            nm._INFLUENCER_W_AUTHOR = original
+        assert abs(scaled["weight"] - baseline["weight"] * 0.5) < 1e-6
+
+    def test_build_does_not_apply_scaffolds_to_other_layers(self):
+        """Market/narrative/macro layers do not multiply w_author/w_conf."""
+        import pipeline.features.normalize as nm
+        now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+        ts = now
+        baseline = nm._build("rsi_14", 55.0, 50.0, "yfinance", ts, "market", "AAPL", now)
+        original = nm._INFLUENCER_W_AUTHOR
+        try:
+            nm._INFLUENCER_W_AUTHOR = 0.5
+            unchanged = nm._build("rsi_14", 55.0, 50.0, "yfinance", ts, "market", "AAPL", now)
+        finally:
+            nm._INFLUENCER_W_AUTHOR = original
+        assert baseline["weight"] == unchanged["weight"]
