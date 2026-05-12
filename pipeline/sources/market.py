@@ -114,7 +114,8 @@ def _fetch_bid_ask_spread(ticker: str) -> dict | None:
 
     try:
         info = yf.Ticker(ticker).info
-    except Exception:
+    except Exception as exc:
+        _log.warning("yfinance Ticker.info failed for %s: %s", ticker, exc)
         return None
 
     bid = info.get("bid")
@@ -308,7 +309,7 @@ async def _run_market(
         async with YF_INFO_SEM:
             ba = await asyncio.to_thread(_fetch_bid_ask_spread, ticker)
         if ba is not None:
-            _log.info("bid_ask_spread %s bps=%.2f", ticker, ba["spread_bps"])
+            _log.debug("bid_ask_spread %s bps=%.2f", ticker, ba["spread_bps"])
             rows.extend([
                 (ticker, "bid_ask_spread",     ba["spread"],     "yfinance", "live", now),
                 (ticker, "bid_ask_spread_bps", ba["spread_bps"], "yfinance", "live", now),

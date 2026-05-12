@@ -185,7 +185,7 @@ async def _score_all(
                 fetched += 1
                 total_layers += n_layers
             except Exception as exc:
-                _log.error(
+                _log.warning(
                     "%s: scoring failed for %s: %s", job_name, ticker, exc, exc_info=True
                 )
             finally:
@@ -236,7 +236,7 @@ async def _yf_batch_download(tickers: list[str]) -> dict[str, dict]:
     try:
         raw = await loop.run_in_executor(None, _download)
     except Exception as exc:
-        _log.error("yfinance batch download failed: %s", exc)
+        _log.warning("yfinance batch download failed: %s", exc)
         return {}
 
     if raw.empty:
@@ -310,10 +310,6 @@ async def market_job() -> None:
     await _record_run("market")
 
     elapsed = time.monotonic() - t_start
-    print(
-        f"[MARKET] fetch done in {_fmt_elapsed(elapsed)} — {n} tickers",
-        file=sys.stderr,
-    )
     _log.info(
         "market_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips",
         n, elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
@@ -347,10 +343,6 @@ async def market_eod_job() -> None:
     await _record_run("market_eod")
 
     elapsed = time.monotonic() - t_start
-    print(
-        f"[MARKET_EOD] fetch done in {_fmt_elapsed(elapsed)} — {n} tickers",
-        file=sys.stderr,
-    )
     _log.info(
         "market_eod_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips",
         n, elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
@@ -442,7 +434,7 @@ async def narrative_job() -> None:
             await update_finbert_scores(rows)
             n_scored = len(rows)
     except Exception as exc:
-        _log.error("narrative_job: FinBERT scoring failed: %s", exc, exc_info=True)
+        _log.warning("narrative_job: FinBERT scoring failed: %s", exc, exc_info=True)
 
     finbert_elapsed = time.monotonic() - t_finbert_start
     _log.info(
@@ -453,12 +445,6 @@ async def narrative_job() -> None:
     await _record_run("narrative")
 
     elapsed = time.monotonic() - t_start
-    print(
-        f"[NARRATIVE] fetch {_fmt_elapsed(fetch_elapsed)} — {n} tickers, "
-        f"cluster {_fmt_elapsed(cluster_elapsed)} — {total_clusters} clusters, "
-        f"finbert {_fmt_elapsed(finbert_elapsed)} — {n_scored} scored",
-        file=sys.stderr,
-    )
     _log.info(
         "narrative_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips, "
         "%d clusters in %.1fs, %d finbert-scored in %.1fs",
@@ -487,10 +473,6 @@ async def influencer_job() -> None:
     await _record_run("influencer")
 
     elapsed = time.monotonic() - t_start
-    print(
-        f"[INFLUENCER] fetch done in {_fmt_elapsed(elapsed)} — {n} tickers",
-        file=sys.stderr,
-    )
     _log.info(
         "influencer_job complete: %d tickers fetched in %.1fs, %d rate-limit skips, %d net-error skips",
         n, elapsed, job_counters.rate_limit_skips, job_counters.net_error_skips,
@@ -513,15 +495,11 @@ async def macro_job() -> None:
         try:
             await fetch_macro_signals(client)
         except Exception as exc:
-            _log.error("macro_job: macro fetch failed: %s", exc, exc_info=True)
+            _log.warning("macro_job: macro fetch failed: %s", exc, exc_info=True)
 
     await _record_run("macro")
 
     elapsed = time.monotonic() - t_start
-    print(
-        f"[MACRO] fetch done in {_fmt_elapsed(elapsed)}",
-        file=sys.stderr,
-    )
     _log.info("macro_job complete in %.1fs", elapsed)
 
 
@@ -543,16 +521,12 @@ async def short_volume_job() -> None:
         async with httpx.AsyncClient(timeout=30) as client:
             n_tickers = await ingest_short_volume(client)
     except Exception as exc:
-        _log.error("short_volume_job: failed: %s", exc, exc_info=True)
+        _log.warning("short_volume_job: failed: %s", exc, exc_info=True)
         n_tickers = 0
 
     await _record_run("short_volume")
 
     elapsed = time.monotonic() - t_start
-    print(
-        f"[SHORT_VOLUME] done in {_fmt_elapsed(elapsed)} — {n_tickers} tickers written",
-        file=sys.stderr,
-    )
     _log.info("short_volume_job complete: %d tickers in %.1fs", n_tickers, elapsed)
 
 
@@ -576,10 +550,6 @@ async def scoring_tick_job() -> None:
 
     elapsed = time.monotonic() - t_start
     avg = total_layers / fetched if fetched else 0
-    print(
-        f"[SCORING_TICK] done in {_fmt_elapsed(elapsed)} — {fetched}/{n} scored, avg {avg:.1f}/4 layers",
-        file=sys.stderr,
-    )
     _log.info(
         "scoring_tick_job complete: %d/%d scored, avg %.1f/4 layers in %.1fs",
         fetched, n, avg, elapsed,

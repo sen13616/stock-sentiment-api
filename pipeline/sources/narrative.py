@@ -122,8 +122,8 @@ async def _fetch_av_news(ticker: str, client: httpx.AsyncClient) -> list[dict]:
                 try:
                     provider_sentiment = float(ts["ticker_sentiment_score"])
                     relevance_score    = float(ts["relevance_score"])
-                except (KeyError, ValueError):
-                    pass
+                except (KeyError, ValueError) as exc:
+                    _log.debug("AV ticker_sentiment field malformed for %s: %s", ticker, exc)
                 break
 
         articles.append({

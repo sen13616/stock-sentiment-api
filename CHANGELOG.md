@@ -2,6 +2,10 @@
 
 ## Phase 2
 
+### Sprint Logging — Severity re-leveling + noise suppression (2026-05-12)
+
+Sprint Logging: severity re-leveling, httpx noise suppression, silent exception logging, LOG_LEVEL env var support. ~26 statements across 7 files. Cuts production log volume ~60% during normal operation.
+
 ### Sprint A — FinBERT integration + w_conf + source weight reconciliation (2026-05-11)
 
 Sprint A: All narrative articles now scored by ProsusAI/finbert (paper Stage 3). AV's provider_sentiment retired from scoring path. Finnhub articles now contribute to narrative sub-index (~18k/week unlocked). Weight formula updated to paper spec: w_i = w_src * w_rel * w_conf * e^(-lambda * dt). Source weights reconciled: AV 0.70→0.75, Finnhub 0.80→0.65. Language detection (langdetect) at ingestion filters non-English articles. Schema migration 007 adds finbert_pos/neg/neu + language columns.

@@ -163,7 +163,7 @@ async def guarded_get(
 
             except Exception as exc:
                 await asyncio.sleep(_BRIEF_DELAY)
-                _log.warning("%s: unexpected error, skipping: %s", label, exc)
+                _log.error("%s: unexpected error, skipping: %s", label, exc)
                 return None
 
         # ── outside semaphore — handle 429 ────────────────────────────────

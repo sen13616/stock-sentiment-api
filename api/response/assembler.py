@@ -54,7 +54,8 @@ def _cache_age(timestamp: datetime | str | None) -> int:
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         return max(0, int((_now_utc() - ts).total_seconds()))
-    except Exception:
+    except Exception as exc:
+        _log.debug("cache_age: timestamp parse failed, returning 0: %s", exc)
         return 0
 
 

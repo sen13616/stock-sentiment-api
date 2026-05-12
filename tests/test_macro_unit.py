@@ -135,7 +135,7 @@ async def test_log_format_no_valueerror(caplog):
         patch("pipeline.sources.macro.insert_signals", new_callable=AsyncMock),
         patch("pipeline.sources.macro.get_close_history", new_callable=AsyncMock, return_value=close_history),
         patch("pipeline.sources.macro.SECTOR_ETFS", {"Test Sector": "XTT"}),
-        caplog.at_level(logging.INFO, logger="pipeline.sources.macro"),
+        caplog.at_level(logging.DEBUG, logger="pipeline.sources.macro"),
     ):
         # This must NOT raise ValueError from a malformed format string
         await _run_macro(client)

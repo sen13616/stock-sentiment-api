@@ -8,6 +8,7 @@ Lifespan events:
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,10 +19,13 @@ from db.connection import close_pool, init_pool
 from db.redis import close_redis, init_redis
 from pipeline.scheduler import scheduler
 
+_log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+_log_level = getattr(logging, _log_level_name, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @asynccontextmanager

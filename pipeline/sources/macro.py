@@ -241,9 +241,9 @@ async def _run_macro(client: httpx.AsyncClient) -> None:
         ret_20d = _compute_etf_return_20d(etf_close, close_history)
         if ret_20d is not None:
             rows.append((etf, "sector_etf_return_20d", ret_20d, "computed", "live", now))
-            _log.info("%s: close=%.2f  20d_return=%+.4f", etf, etf_close, ret_20d)
+            _log.debug("%s: close=%.2f  20d_return=%+.4f", etf, etf_close, ret_20d)
         else:
-            _log.info("%s: close=%.2f  (insufficient history for 20d return)", etf, etf_close)
+            _log.debug("%s: close=%.2f  (insufficient history for 20d return)", etf, etf_close)
 
     await insert_signals(rows)
 

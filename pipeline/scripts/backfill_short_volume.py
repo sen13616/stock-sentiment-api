@@ -210,8 +210,7 @@ async def backfill(days_back: int = 90, start: date | None = None, end: date | N
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)-5s %(message)s",
-        datefmt="%H:%M:%S",
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
     )
 
     parser = argparse.ArgumentParser(description="Backfill FINRA short volume data")

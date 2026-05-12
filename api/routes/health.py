@@ -15,10 +15,13 @@ With Authorization: Bearer <token>:
 from __future__ import annotations
 
 import hashlib
+import logging
 
 from fastapi import APIRouter, Request
 
 from db.queries.api_keys import get_key_tier
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -41,5 +44,6 @@ async def health(request: Request) -> dict:
         key_hash = _hash_token(token)
         tier = await get_key_tier(key_hash)
         return {"status": "ok", "tier": tier}
-    except Exception:
+    except Exception as exc:
+        _log.debug("health check tier lookup failed (returning ok): %s", exc)
         return {"status": "ok"}

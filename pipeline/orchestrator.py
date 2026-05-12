@@ -418,7 +418,7 @@ async def _score_and_write(ticker: str) -> int:
 
     n_populated = sum(1 for v in sub_indices.values() if v is not None)
 
-    _log.info(
+    _log.debug(
         "[%s] scored  raw=%.1f  smoothed=%.1f  ema_n=%d  confidence=%d  divergence=%s  missing=%s  layers=%d/4",
         ticker,
         effective_score,

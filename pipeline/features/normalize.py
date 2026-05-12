@@ -225,7 +225,7 @@ def log_scoring_telemetry() -> None:
         return
     for sig_type in sorted(_scoring_method_counts):
         c = _scoring_method_counts[sig_type]
-        _log.info(
+        _log.debug(
             "[telemetry] %s: zscore=%d parametric_fallback=%d",
             sig_type, c["zscore"], c["parametric_fallback"],
         )

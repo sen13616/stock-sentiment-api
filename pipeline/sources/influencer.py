@@ -228,7 +228,8 @@ async def _insider_finnhub(ticker: str, client: httpx.AsyncClient) -> list[tuple
 
     try:
         body = resp.json()
-    except Exception:
+    except Exception as exc:
+        _log.debug("Finnhub insider-transactions JSON parse failed for %s: %s", ticker, exc)
         return rows
 
     for txn in body.get("data", []):
@@ -268,7 +269,8 @@ async def _analyst_recommendations(
 
     try:
         data = resp.json()
-    except Exception:
+    except Exception as exc:
+        _log.debug("Finnhub recommendation JSON parse failed for %s: %s", ticker, exc)
         return None
 
     if not isinstance(data, list) or not data:
@@ -308,7 +310,8 @@ async def _analyst_target_price(
 
     try:
         body = resp.json()
-    except Exception:
+    except Exception as exc:
+        _log.debug("Finnhub price-target JSON parse failed for %s: %s", ticker, exc)
         return None
 
     try:
