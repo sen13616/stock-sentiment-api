@@ -243,6 +243,7 @@ _ZSCORE_CONFIG: dict[str, RollingZScorer] = {
     "short_volume_ratio_otc": RollingZScorer(window=90, negate=True),
     "insider_net_shares":     RollingZScorer(window=90),
     "analyst_buy_pct":        RollingZScorer(window=90),
+    "analyst_target_price":   RollingZScorer(window=90, fill_threshold=0.5),
     "vix":                    RollingZScorer(window=90, negate=True),
 }
 
@@ -605,6 +606,13 @@ async def score_influencer_signals(
         if zscore_cfg is not None:
             history = await get_signal_history(ticker, sig_type, limit=zscore_cfg.window)
 
+        # Sprint P3.2 option (c): analyst_target_price stores RAW target; the
+        # quantity actually z-scored is the per-row upside vs the *current* close.
+        # Transform once per signal_type.
+        upside_history: list[float] | None = None
+        if is_target and history is not None and current_price is not None and current_price > 0:
+            upside_history = [(h - current_price) / current_price for h in history]
+
         for row in rows:
             value = float(row["value"])
             if math.isnan(value) or math.isinf(value):
@@ -616,7 +624,16 @@ async def score_influencer_signals(
             method = "parametric_fallback"
 
             if is_target:
-                score = _score_analyst_target(value, current_price)
+                # Z-score upside if we have enough history and a current_price.
+                if (zscore_cfg is not None and upside_history is not None
+                        and current_price is not None and current_price > 0):
+                    upside_now = (value - current_price) / current_price
+                    score = zscore_cfg.score_from_history(upside_history, upside_now)
+                    if score is not None:
+                        method = "zscore"
+                # Parametric fallback (cold-start path).
+                if score is None:
+                    score = _score_analyst_target(value, current_price)
                 if score is None:
                     continue
             else:

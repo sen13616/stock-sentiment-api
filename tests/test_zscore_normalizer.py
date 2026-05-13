@@ -346,6 +346,14 @@ class TestZScoreConfig:
 
     def test_no_config_for_excluded_signals(self):
         """Signals excluded from z-score should NOT be in _ZSCORE_CONFIG."""
-        for sig in ("buy_pressure", "sell_pressure",
-                     "sector_etf_return_20d", "analyst_target_price"):
+        # Sprint P3.2: analyst_target_price now HAS a z-score config (against upside, not raw price).
+        for sig in ("buy_pressure", "sell_pressure", "sector_etf_return_20d"):
             assert sig not in _ZSCORE_CONFIG, f"{sig} should not have z-score config"
+
+    def test_analyst_target_price_has_zscore_config(self):
+        """Sprint P3.2 I9: analyst_target_price uses 90-day rolling z-score over upside."""
+        assert "analyst_target_price" in _ZSCORE_CONFIG
+        cfg = _ZSCORE_CONFIG["analyst_target_price"]
+        assert cfg.window == 90
+        assert cfg.fill_threshold == 0.5
+        assert cfg.negate is False

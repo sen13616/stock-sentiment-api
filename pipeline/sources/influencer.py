@@ -16,8 +16,9 @@ analyst_buy_pct
             = (strongBuy + buy) / total recommendations  (0–1 scale)
 
 analyst_target_price
-  Source:   Finnhub /stock/price-target
-            targetMean from latest analyst consensus
+  Source:   yfinance — Ticker(t).info.get("targetMeanPrice")
+            (paper Data Collection table; Sprint P3.2 — replaced Finnhub
+            /stock/price-target which 403s on free tier)
 
 All written with upload_type='live'.
 """
@@ -30,6 +31,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import yfinance as yf
 from dotenv import load_dotenv
 
 from db.queries.raw_signals import insert_signals
@@ -291,33 +293,29 @@ async def _analyst_recommendations(
         return None
 
 
-async def _analyst_target_price(
-    ticker: str,
-    client: httpx.AsyncClient,
-) -> float | None:
+async def _analyst_target_yf(ticker: str) -> float | None:
+    """yfinance Ticker(t).info["targetMeanPrice"] → analyst_target_price.
+
+    Paper Data Collection table specifies yfinance for this signal. Wrapped in
+    asyncio.to_thread because yfinance is synchronous (mirrors macro.py:75-89).
     """
-    Finnhub /stock/price-target → analyst_target_price (targetMean).
-    """
-    resp = await guarded_get(
-        client, f"{_FINNHUB_BASE}/stock/price-target",
-        params={"symbol": ticker, "token": _FINNHUB_KEY},
-        sem=FINNHUB_SEM, delay=FINNHUB_DELAY, label=f"Finnhub price-target {ticker}",
-    )
-    if resp is None or resp.status_code != 200:
-        # 403 expected on Finnhub free tier
-        _log.debug("Finnhub price-target unavailable for %s", ticker)
-        return None
+    def _fetch() -> float | None:
+        info = yf.Ticker(ticker).info
+        target = info.get("targetMeanPrice")
+        if target is None:
+            return None
+        try:
+            value = float(target)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return value
 
     try:
-        body = resp.json()
+        return await asyncio.to_thread(_fetch)
     except Exception as exc:
-        _log.debug("Finnhub price-target JSON parse failed for %s: %s", ticker, exc)
-        return None
-
-    try:
-        target = body.get("targetMean")
-        return float(target) if target is not None else None
-    except (ValueError, TypeError):
+        _log.debug("yfinance targetMeanPrice unavailable for %s: %s", ticker, exc)
         return None
 
 
@@ -347,10 +345,10 @@ async def _run_influencer(ticker: str, client: httpx.AsyncClient) -> None:
     if buy_pct is not None:
         rows.append((ticker, "analyst_buy_pct", buy_pct, "finnhub", "live", now))
 
-    # --- Analyst target price ---
-    target = await _analyst_target_price(ticker, client)
+    # --- Analyst target price (P3.2: yfinance per paper Data Collection table) ---
+    target = await _analyst_target_yf(ticker)
     if target is not None:
-        rows.append((ticker, "analyst_target_price", target, "finnhub", "live", now))
+        rows.append((ticker, "analyst_target_price", target, "yfinance", "live", now))
 
     await insert_signals(rows)
 
