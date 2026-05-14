@@ -79,9 +79,9 @@ _MOCK_STATE_MISSING_LAYERS: dict = {
 }
 
 _MOCK_TICKER_ROWS = [
-    {"ticker": "AAPL", "company_name": "Apple Inc."},
-    {"ticker": "MSFT", "company_name": "Microsoft Corp."},
-    {"ticker": "NVDA", "company_name": "NVIDIA Corp."},
+    {"ticker": "AAPL", "company_name": "Apple Inc.",     "sector": "Information Technology"},
+    {"ticker": "MSFT", "company_name": "Microsoft Corp.", "sector": "Information Technology"},
+    {"ticker": "NVDA", "company_name": "NVIDIA Corp.",   "sector": "Information Technology"},
 ]
 
 

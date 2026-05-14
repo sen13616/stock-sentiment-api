@@ -21,5 +21,8 @@ async def list_tickers(
     tier: str = Depends(authenticate),
 ) -> TickersResponse:
     rows = await get_all_tickers()
-    items = [TickerItem(ticker=r["ticker"], name=r["company_name"]) for r in rows]
+    items = [
+        TickerItem(ticker=r["ticker"], name=r["company_name"], sector=r["sector"])
+        for r in rows
+    ]
     return TickersResponse(universe_size=len(items), tickers=items)

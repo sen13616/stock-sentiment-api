@@ -143,6 +143,7 @@ class HistoryResponse(BaseModel):
 class TickerItem(BaseModel):
     ticker: str
     name:   Optional[str] = None
+    sector: Optional[str] = None   # GICS sector (P4.1); None if not yet seeded
 
 
 class TickersResponse(BaseModel):

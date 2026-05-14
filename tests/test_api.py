@@ -210,9 +210,9 @@ class TestSentimentUnknownTicker:
 class TestTickers:
 
     _MOCK_ROWS = [
-        {"ticker": "AAPL", "company_name": "Apple Inc."},
-        {"ticker": "MSFT", "company_name": "Microsoft Corp."},
-        {"ticker": "NVDA", "company_name": "NVIDIA Corp."},
+        {"ticker": "AAPL", "company_name": "Apple Inc.",     "sector": "Information Technology"},
+        {"ticker": "MSFT", "company_name": "Microsoft Corp.", "sector": "Information Technology"},
+        {"ticker": "NVDA", "company_name": "NVIDIA Corp.",   "sector": "Information Technology"},
     ]
 
     def test_returns_universe_size_and_tickers_list(self, free_client):
