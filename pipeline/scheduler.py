@@ -44,7 +44,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from tqdm import tqdm as _tqdm
 from tqdm.asyncio import tqdm as _atqdm
 
-from db.queries.universe import get_active_tickers
+from db.queries.universe import get_active_tickers, get_ticker_sector_map
 from db.redis import get_redis
 from pipeline.features.normalize import log_scoring_telemetry, reset_scoring_telemetry
 from pipeline.orchestrator import _score_and_write
@@ -155,12 +155,21 @@ _SCORE_SEM = asyncio.Semaphore(10)  # bound concurrent DB connections (asyncpg d
 async def _score_all(
     tickers: list[str],
     job_name: str,
+    sector_map: dict[str, str] | None = None,
 ) -> tuple[int, int]:
     """
     Score all tickers concurrently, bounded by _SCORE_SEM to stay within
     the asyncpg connection pool limit.
 
     All four layers are recomputed from current DB state for every ticker.
+
+    Parameters
+    ----------
+    sector_map : dict[str, str] | None
+        Sprint P4.2 — preloaded ``{ticker: GICS sector}`` map. The macro
+        layer routes per-ticker via the sector. ``None`` is allowed
+        (each ticker is scored without sector context, producing a
+        VIX-only macro sub-index — degraded behaviour but won't crash).
 
     Returns (fetched_count, total_layers_populated).
     """
@@ -179,9 +188,10 @@ async def _score_all(
 
     async def _bounded(ticker: str) -> None:
         nonlocal fetched, total_layers
+        sector = (sector_map or {}).get(ticker)
         async with _SCORE_SEM:
             try:
-                n_layers = await _score_and_write(ticker)
+                n_layers = await _score_and_write(ticker, sector)
                 fetched += 1
                 total_layers += n_layers
             except Exception as exc:
@@ -544,7 +554,22 @@ async def scoring_tick_job() -> None:
     tickers = await get_active_tickers()
     n = len(tickers)
 
-    fetched, total_layers = await _score_all(tickers, "SCORING_TICK")
+    # Sprint P4.2: preload the ticker→GICS-sector map once per tick so the
+    # per-ticker macro routing in _score_macro doesn't fire 502 DB queries.
+    try:
+        sector_map = await get_ticker_sector_map()
+        _log.info(
+            "scoring_tick_job: loaded sector map for %d/%d tickers",
+            len(sector_map), n,
+        )
+    except Exception as exc:
+        _log.warning(
+            "scoring_tick_job: get_ticker_sector_map failed: %s — falling back to VIX-only macro",
+            exc,
+        )
+        sector_map = {}
+
+    fetched, total_layers = await _score_all(tickers, "SCORING_TICK", sector_map=sector_map)
     log_scoring_telemetry()
     await _record_run("scoring_tick")
 

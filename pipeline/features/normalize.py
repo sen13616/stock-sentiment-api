@@ -64,10 +64,14 @@ _LAYER_HALF_LIFE_H: dict[str, float] = {
     "macro":      336.0,    # 14 days
 }
 
-# Overrides for specific (layer, source) combinations
-_HALF_LIFE_OVERRIDE: dict[tuple[str, str], float] = {
-    ("influencer", "sec_edgar"): 168.0,   # SEC filings: 7 days (provider-keyed; superseded by signal-type override below for insider rows)
-}
+# Overrides for specific (layer, source) combinations.
+# Sprint P3.4 removed the only entry — `("influencer", "sec_edgar"): 168.0` —
+# because the EDGAR Form 4 primary path was deleted and the 168h insider half-life
+# is now applied via `_INFLUENCER_SIGNAL_HALF_LIFE_H["insider_net_shares"]` below
+# (P3.1, I4). Kept as an empty dict so future (layer, source) overrides have a home.
+# Note: this line was missing from P3.4 commit abb6008 (only the test landed) and from
+# P4.1 commit 425eba8; restored during Sprint P4.2 baseline pre-flight (2026-05-15).
+_HALF_LIFE_OVERRIDE: dict[tuple[str, str], float] = {}
 
 # Influencer-layer signal-type overrides (Sprint P3.1, paper §Event-Level Weighting).
 # Paper specifies half-life by *signal channel*, not data provider. Takes precedence
@@ -246,6 +250,10 @@ _ZSCORE_CONFIG: dict[str, RollingZScorer] = {
     "analyst_target_price":   RollingZScorer(window=90, fill_threshold=0.5),
     "earnings_estimate_revision": RollingZScorer(window=90),
     "vix":                    RollingZScorer(window=90, negate=True),
+    # Sprint P4.2: per-ETF rolling z-score; history is keyed under the ETF
+    # symbol (XLK, XLE, …), not the ticker being scored. ~22 daily obs per
+    # ETF today → parametric fallback runs for ~3 more weeks.
+    "sector_etf_return_20d":  RollingZScorer(window=90),
 }
 
 
@@ -716,21 +724,30 @@ async def score_influencer_signals(
 
 
 async def score_macro_signals(
+    ticker: str,
+    sector: str | None,
     raw: list[dict],
     now: datetime,
 ) -> list[dict]:
     """
     Convert raw macro signal rows (VIX + sector ETF returns) to scored dicts.
 
-    VIX uses z-score normalization when sufficient history is available.
-    sector_etf_return_20d always uses parametric scoring (deferred — insufficient
-    per-ETF history).
+    Sprint P4.2: the macro layer is now per-ticker. VIX remains a shared
+    global signal (history under `_MACRO_`); the sector ETF return is
+    z-scored against the relevant ETF's own history, looked up via the
+    ticker's GICS sector. If the ticker has `sector IS NULL` the ETF
+    component is silently dropped and weight redistribution absorbs.
 
     Parameters
     ----------
-    raw : rows from get_signals_since() across '_MACRO_' and ETF tickers.
+    ticker : str — the ticker whose macro sub-index we are computing
+    sector : str | None — its GICS sector (e.g. "Information Technology")
+    raw    : rows from get_signals_since() across '_MACRO_' and the ETF
+             corresponding to the ticker's sector
+    now    : scoring tick wall-clock time
     """
     from db.queries.raw_signals import get_signal_history
+    from pipeline.sources.macro import SECTOR_ETFS
 
     result: list[dict] = []
 
@@ -747,12 +764,21 @@ async def score_macro_signals(
         if zscore_cfg is None and parametric is None:
             continue
 
-        # For VIX z-score, fetch history using the _MACRO_ ticker
+        # History lookup ticker depends on the signal type:
+        # • VIX                    → stored under '_MACRO_'
+        # • sector_etf_return_20d  → stored under the ETF symbol;
+        #                            resolve from the ticker's GICS sector
         history: list[float] | None = None
+        history_ticker: str | None = None
         if zscore_cfg is not None:
-            # VIX is stored under _MACRO_; ETF signals under their ticker.
-            # Since only VIX has z-score config, _MACRO_ is always correct here.
-            history = await get_signal_history("_MACRO_", sig_type, limit=zscore_cfg.window)
+            if sig_type == "vix":
+                history_ticker = "_MACRO_"
+            elif sig_type == "sector_etf_return_20d" and sector is not None:
+                history_ticker = SECTOR_ETFS.get(sector)
+            if history_ticker is not None:
+                history = await get_signal_history(
+                    history_ticker, sig_type, limit=zscore_cfg.window,
+                )
 
         for row in rows:
             value = float(row["value"])
@@ -777,7 +803,7 @@ async def score_macro_signals(
             result.append(_build(
                 sig_type, value, score,
                 row.get("source", "alpha_vantage"), row["timestamp"],
-                "macro", "_MACRO_", now,
+                "macro", ticker, now,
             ))
 
     return result

@@ -212,19 +212,21 @@ class TestNanInfGuardsMacro:
     async def test_nan_vix_skipped(self):
         raw = [self._row("vix", float("nan"))]
         with _mock_history:
-            result = await score_macro_signals(raw, _make_ts())
+            # Sprint P4.2: score_macro_signals now takes (ticker, sector, raw, now).
+            # VIX is shared/global, so passing "_MACRO_" preserves the original intent.
+            result = await score_macro_signals("_MACRO_", None, raw, _make_ts())
         assert len(result) == 0
 
     async def test_inf_vix_skipped(self):
         raw = [self._row("vix", float("inf"))]
         with _mock_history:
-            result = await score_macro_signals(raw, _make_ts())
+            result = await score_macro_signals("_MACRO_", None, raw, _make_ts())
         assert len(result) == 0
 
     async def test_valid_vix_passes(self):
         raw = [self._row("vix", 22.0)]
         with _mock_history:
-            result = await score_macro_signals(raw, _make_ts())
+            result = await score_macro_signals("_MACRO_", None, raw, _make_ts())
         assert len(result) == 1
 
 
