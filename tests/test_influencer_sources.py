@@ -103,12 +103,16 @@ class TestRunInfluencerTargetSource:
         async def _target_value(_ticker):
             return 250.0
 
+        async def _no_eps(_ticker):
+            return None  # P3.3 signal not under test here
+
         client = MagicMock()
         with patch.object(influencer_src, "insert_signals", new=AsyncMock(side_effect=_capture_insert)), \
              patch.object(influencer_src, "_get_cik", new=AsyncMock(side_effect=_no_cik)), \
              patch.object(influencer_src, "_insider_finnhub", new=AsyncMock(side_effect=_no_insider)), \
              patch.object(influencer_src, "_analyst_recommendations", new=AsyncMock(side_effect=_analyst_pct)), \
-             patch.object(influencer_src, "_analyst_target_yf", new=AsyncMock(side_effect=_target_value)):
+             patch.object(influencer_src, "_analyst_target_yf", new=AsyncMock(side_effect=_target_value)), \
+             patch.object(influencer_src, "_earnings_estimate_yf", new=AsyncMock(side_effect=_no_eps)):
             await influencer_src._run_influencer("AAPL", client)
 
         # Should have exactly one row written: the analyst_target_price one
@@ -220,3 +224,238 @@ class TestAnalystTargetPriceZScorePath:
         counts = nm._scoring_method_counts.get("analyst_target_price", {})
         assert counts.get("zscore", 0) >= 1
         assert counts.get("parametric_fallback", 0) == 0
+
+
+# ===========================================================================
+# Sprint P3.3 — earnings estimate revisions
+# ===========================================================================
+
+class TestEarningsEstimateYf:
+
+    @pytest.mark.asyncio
+    async def test_returns_avg_eps_for_current_quarter(self):
+        """`0q` row's `avg` column becomes the stored mean-EPS value."""
+        # Mimic the (DataFrame-like) yfinance return: row.get("avg") → 1.89
+        class _Row:
+            def get(self, key, default=None):
+                return {"avg": 1.89}.get(key, default)
+
+        class _Est:
+            empty = False
+            index = ["0q", "+1q", "0y", "+1y"]
+            def __contains__(self, item):
+                return item in self.index
+            class _Loc:
+                def __getitem__(self, key):
+                    if key == "0q":
+                        return _Row()
+                    raise KeyError(key)
+            loc = _Loc()
+
+        class _Ticker:
+            def get_earnings_estimate(self):
+                return _Est()
+
+        with patch.object(influencer_src.yf, "Ticker", return_value=_Ticker()):
+            value = await influencer_src._earnings_estimate_yf("AAPL")
+        assert value == pytest.approx(1.89)
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_0q_row(self):
+        class _Est:
+            empty = False
+            index = ["+1q", "0y", "+1y"]
+            def __contains__(self, item):
+                return item in self.index
+
+        class _Ticker:
+            def get_earnings_estimate(self):
+                return _Est()
+
+        with patch.object(influencer_src.yf, "Ticker", return_value=_Ticker()):
+            value = await influencer_src._earnings_estimate_yf("XYZ")
+        assert value is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_dataframe_empty(self):
+        class _Est:
+            empty = True
+
+        class _Ticker:
+            def get_earnings_estimate(self):
+                return _Est()
+
+        with patch.object(influencer_src.yf, "Ticker", return_value=_Ticker()):
+            value = await influencer_src._earnings_estimate_yf("XYZ")
+        assert value is None
+
+    @pytest.mark.asyncio
+    async def test_swallows_yfinance_exception(self):
+        class _Ticker:
+            def get_earnings_estimate(self):
+                raise RuntimeError("yfinance schema changed")
+
+        with patch.object(influencer_src.yf, "Ticker", return_value=_Ticker()):
+            value = await influencer_src._earnings_estimate_yf("XYZ")
+        assert value is None
+
+
+class TestRunInfluencerEarningsRow:
+
+    @pytest.mark.asyncio
+    async def test_eps_row_uses_yfinance_source(self):
+        """End-to-end: _run_influencer with mocked sub-calls writes an EPS row with source='yfinance'."""
+        captured: list = []
+
+        async def _capture_insert(rows):
+            captured.extend(rows)
+
+        async def _none(*_a, **_kw):
+            return None
+
+        async def _no_cik(*_a, **_kw):
+            return None
+
+        async def _no_insider(*_a, **_kw):
+            return []
+
+        async def _eps_value(_ticker):
+            return 1.89
+
+        client = MagicMock()
+        with patch.object(influencer_src, "insert_signals", new=AsyncMock(side_effect=_capture_insert)), \
+             patch.object(influencer_src, "_get_cik", new=AsyncMock(side_effect=_no_cik)), \
+             patch.object(influencer_src, "_insider_finnhub", new=AsyncMock(side_effect=_no_insider)), \
+             patch.object(influencer_src, "_analyst_recommendations", new=AsyncMock(side_effect=_none)), \
+             patch.object(influencer_src, "_analyst_target_yf", new=AsyncMock(side_effect=_none)), \
+             patch.object(influencer_src, "_earnings_estimate_yf", new=AsyncMock(side_effect=_eps_value)):
+            await influencer_src._run_influencer("AAPL", client)
+
+        assert len(captured) == 1
+        ticker, sig_type, value, source, upload_type, _ts = captured[0]
+        assert ticker == "AAPL"
+        assert sig_type == "analyst_eps_estimate_mean"
+        assert value == pytest.approx(1.89)
+        assert source == "yfinance"
+        assert upload_type == "live"
+
+
+def _eps_row(value, ts=None):
+    return {
+        "signal_type": "analyst_eps_estimate_mean",
+        "value": value,
+        "source": "yfinance",
+        "timestamp": ts or datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+    }
+
+
+class TestEarningsRevisionDeltaPath:
+
+    def test_parametric_scorer_neutral_at_zero(self):
+        assert nm._score_earnings_revision_delta(0.0) == pytest.approx(50.0)
+
+    def test_parametric_scorer_bullish_on_positive_delta(self):
+        # +5% revision → tanh(1) ≈ 0.7616 → 50 + 38.1 ≈ 88.1
+        assert 80.0 < nm._score_earnings_revision_delta(0.05) < 95.0
+
+    def test_parametric_scorer_bearish_on_negative_delta(self):
+        assert 5.0 < nm._score_earnings_revision_delta(-0.05) < 20.0
+
+    def test_parametric_scorer_clamps_at_extremes(self):
+        assert nm._score_earnings_revision_delta(10.0) == pytest.approx(100.0)
+        assert nm._score_earnings_revision_delta(-10.0) == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_revision_emitted_when_history_has_two_obs(self):
+        """With one prior obs in history, scoring emits earnings_estimate_revision."""
+        # history is oldest-first; newest entry == current value (just written)
+        history = [1.50, 1.65]  # prior=1.50, current=1.65 → delta = +10%
+        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+            scored = await nm.score_influencer_signals(
+                "TEST", [_eps_row(1.65)],
+                now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+                current_price=100.0,
+            )
+        revisions = [s for s in scored if s["signal_type"] == "earnings_estimate_revision"]
+        assert len(revisions) == 1
+        sig = revisions[0]
+        # Stored value should be the delta itself
+        assert sig["value"] == pytest.approx(0.10)
+        # +10% delta is > half-scale → strongly bullish under parametric formula
+        assert sig["score"] > 90.0
+        # Weight = _INFLUENCER_SIGNAL_WEIGHT["earnings_estimate_revision"] = 0.80
+        # × w_author=1 × w_conf=1 × w_time≈1 (same timestamp) ≈ 0.80
+        assert abs(sig["weight"] - 0.80) < 0.02
+
+    @pytest.mark.asyncio
+    async def test_revision_skipped_when_history_too_short(self):
+        """First-ever obs: no prior in history → revision not emitted."""
+        history = [1.65]  # only the just-written value, no prior
+        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+            scored = await nm.score_influencer_signals(
+                "TEST", [_eps_row(1.65)],
+                now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+            )
+        assert all(s["signal_type"] != "earnings_estimate_revision" for s in scored)
+
+    @pytest.mark.asyncio
+    async def test_revision_skipped_when_prior_is_zero(self):
+        """Prior obs == 0 would cause div-by-zero; signal must be skipped."""
+        history = [0.0, 1.50]
+        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+            scored = await nm.score_influencer_signals(
+                "TEST", [_eps_row(1.50)],
+                now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+            )
+        assert all(s["signal_type"] != "earnings_estimate_revision" for s in scored)
+
+    @pytest.mark.asyncio
+    async def test_revision_bearish_on_downward_revision(self):
+        history = [2.00, 1.80]  # delta = -10%
+        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+            scored = await nm.score_influencer_signals(
+                "TEST", [_eps_row(1.80)],
+                now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+            )
+        revisions = [s for s in scored if s["signal_type"] == "earnings_estimate_revision"]
+        assert len(revisions) == 1
+        assert revisions[0]["value"] == pytest.approx(-0.10)
+        assert revisions[0]["score"] < 10.0
+
+    @pytest.mark.asyncio
+    async def test_zscore_path_used_with_enough_delta_history(self):
+        """≥45 deltas in history → z-score path engages; telemetry records 'zscore'."""
+        # Build 50 raw obs with small consistent positive drift, then a big spike.
+        # Deltas in history are ~+1%; current delta is +20% → z >> +3 → ~100 score.
+        base = [1.00 + 0.01 * i for i in range(50)]  # ~+1% each step
+        history = base + [base[-1] * 1.20]  # final step is +20% — the "current" obs
+        nm.reset_scoring_telemetry()
+
+        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+            scored = await nm.score_influencer_signals(
+                "TEST", [_eps_row(history[-1])],
+                now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+            )
+
+        revisions = [s for s in scored if s["signal_type"] == "earnings_estimate_revision"]
+        assert len(revisions) == 1
+        assert revisions[0]["score"] > 90.0
+        counts = nm._scoring_method_counts.get("earnings_estimate_revision", {})
+        assert counts.get("zscore", 0) == 1
+        assert counts.get("parametric_fallback", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_parametric_fallback_when_delta_history_too_short(self):
+        """Few prior obs → delta_history insufficient for z-score → parametric used."""
+        history = [1.00, 1.10]  # only 2 obs → 0 entries in delta_history → parametric
+        nm.reset_scoring_telemetry()
+
+        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+            await nm.score_influencer_signals(
+                "TEST", [_eps_row(1.10)],
+                now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+            )
+
+        counts = nm._scoring_method_counts.get("earnings_estimate_revision", {})
+        assert counts.get("parametric_fallback", 0) == 1
+        assert counts.get("zscore", 0) == 0

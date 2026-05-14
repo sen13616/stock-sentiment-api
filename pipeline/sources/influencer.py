@@ -319,6 +319,44 @@ async def _analyst_target_yf(ticker: str) -> float | None:
         return None
 
 
+async def _earnings_estimate_yf(ticker: str) -> float | None:
+    """yfinance Ticker(t).get_earnings_estimate() → current-quarter mean EPS.
+
+    Returns the `avg` column of the `0q` row (current fiscal quarter). Stored
+    raw at signal_type ``analyst_eps_estimate_mean``; scoring derives the
+    period-over-period delta from history (Sprint P3.3).
+    """
+    def _fetch() -> float | None:
+        est = yf.Ticker(ticker).get_earnings_estimate()
+        if est is None:
+            return None
+        try:
+            if est.empty or "0q" not in est.index:
+                return None
+        except AttributeError:
+            return None
+        try:
+            row = est.loc["0q"]
+        except KeyError:
+            return None
+        avg = row.get("avg")
+        if avg is None:
+            return None
+        try:
+            value = float(avg)
+        except (TypeError, ValueError):
+            return None
+        if value != value:  # NaN
+            return None
+        return value
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        _log.debug("yfinance get_earnings_estimate unavailable for %s: %s", ticker, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -349,6 +387,11 @@ async def _run_influencer(ticker: str, client: httpx.AsyncClient) -> None:
     target = await _analyst_target_yf(ticker)
     if target is not None:
         rows.append((ticker, "analyst_target_price", target, "yfinance", "live", now))
+
+    # --- Earnings estimate mean EPS (P3.3: yfinance current-quarter avg) ---
+    eps = await _earnings_estimate_yf(ticker)
+    if eps is not None:
+        rows.append((ticker, "analyst_eps_estimate_mean", eps, "yfinance", "live", now))
 
     await insert_signals(rows)
 

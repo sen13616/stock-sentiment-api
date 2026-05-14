@@ -109,6 +109,7 @@ _MARKET_SIGNAL_TYPES_LEGACY = [
 ]
 _INFLUENCER_SIGNAL_TYPES = [
     "insider_net_shares", "analyst_buy_pct", "analyst_target_price",
+    "analyst_eps_estimate_mean",
 ]
 _MACRO_SIGNAL_TYPES = ["vix", "sector_etf_return_20d"]
 

@@ -244,6 +244,7 @@ _ZSCORE_CONFIG: dict[str, RollingZScorer] = {
     "insider_net_shares":     RollingZScorer(window=90),
     "analyst_buy_pct":        RollingZScorer(window=90),
     "analyst_target_price":   RollingZScorer(window=90, fill_threshold=0.5),
+    "earnings_estimate_revision": RollingZScorer(window=90),
     "vix":                    RollingZScorer(window=90, negate=True),
 }
 
@@ -341,6 +342,18 @@ def _score_analyst_target(target: float, current_price: float | None) -> float |
         return None
     upside = (target - current_price) / current_price
     return max(0.0, min(100.0, 50.0 + 50.0 * math.tanh(upside / 0.15)))
+
+
+def _score_earnings_revision_delta(delta: float) -> float:
+    """Earnings estimate revision: period-over-period relative delta in mean EPS.
+
+    Parametric cold-start fallback (paper Appendix 1.4 does not specify a
+    formula for this signal; designed in Sprint P3.3 — flag for paper update).
+    Half-scale point at ±5% revision. Z-score path activates once
+    `earnings_estimate_revision` history exceeds the `RollingZScorer`
+    `fill_threshold`.
+    """
+    return max(0.0, min(100.0, 50.0 + 50.0 * math.tanh(delta / 0.05)))
 
 
 def _score_vix(vix: float) -> float:
@@ -594,6 +607,11 @@ async def score_influencer_signals(
         by_type.setdefault(row["signal_type"], []).append(row)
 
     for sig_type, rows in by_type.items():
+        # analyst_eps_estimate_mean is the raw stored signal; the scored
+        # signal is the derived earnings_estimate_revision (handled below).
+        if sig_type == "analyst_eps_estimate_mean":
+            continue
+
         zscore_cfg = _ZSCORE_CONFIG.get(sig_type)
         parametric = _SIMPLE_SCORERS.get(sig_type)
         is_target = (sig_type == "analyst_target_price")
@@ -652,6 +670,47 @@ async def score_influencer_signals(
 
             _record_method(sig_type, method)
             result.append(_build(sig_type, value, score, source, ts, "influencer", ticker, now))
+
+    # ------------------------------------------------------------------
+    # Sprint P3.3 — derived earnings_estimate_revision from raw EPS history
+    # ------------------------------------------------------------------
+    eps_rows = by_type.get("analyst_eps_estimate_mean")
+    if eps_rows:
+        latest = max(eps_rows, key=lambda r: r["timestamp"])
+        latest_val = float(latest["value"])
+        if not (math.isnan(latest_val) or math.isinf(latest_val)):
+            eps_history = await get_signal_history(
+                ticker, "analyst_eps_estimate_mean", limit=120,
+            )
+            # Need ≥2 obs in history for a period-over-period delta.
+            if len(eps_history) >= 2:
+                prior = eps_history[-2]
+                if prior != 0:
+                    delta = (latest_val - prior) / abs(prior)
+                    # Build delta history from consecutive pairs, excluding the
+                    # final pair (which equals delta_now and would bias the z-score).
+                    delta_history: list[float] = []
+                    for i in range(1, len(eps_history) - 1):
+                        p, c = eps_history[i - 1], eps_history[i]
+                        if p != 0:
+                            delta_history.append((c - p) / abs(p))
+
+                    delta_cfg = _ZSCORE_CONFIG.get("earnings_estimate_revision")
+                    score: float | None = None
+                    method = "parametric_fallback"
+                    if delta_cfg is not None and delta_history:
+                        score = delta_cfg.score_from_history(delta_history, delta)
+                        if score is not None:
+                            method = "zscore"
+                    if score is None:
+                        score = _score_earnings_revision_delta(delta)
+                    if score is not None:
+                        _record_method("earnings_estimate_revision", method)
+                        result.append(_build(
+                            "earnings_estimate_revision", delta, score,
+                            latest.get("source", "unknown"), latest["timestamp"],
+                            "influencer", ticker, now,
+                        ))
 
     return result
 
