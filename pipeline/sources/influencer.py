@@ -7,9 +7,11 @@ and writes them to raw_signals.
 Signals produced
 ----------------
 insider_net_shares
-  Primary:  SEC EDGAR Form 4 (non-derivative transactions)
-            CIK lookup → submissions API → XML parse
-  Fallback: Finnhub /stock/insider-transactions
+  Source:   Finnhub /stock/insider-transactions  (paper Data Collection table)
+            Sprint P3.4 — removed the SEC EDGAR Form 4 primary path which
+            produced 0 rows in production (SGML wrapper breaks
+            xml.etree.ElementTree.fromstring); Finnhub fallback was already
+            carrying 100% of the load.
 
 analyst_buy_pct
   Source:   Finnhub /stock/recommendation
@@ -20,6 +22,12 @@ analyst_target_price
             (paper Data Collection table; Sprint P3.2 — replaced Finnhub
             /stock/price-target which 403s on free tier)
 
+analyst_eps_estimate_mean
+  Source:   yfinance — Ticker(t).get_earnings_estimate() 0q row 'avg' column
+            (paper Data Collection table; Sprint P3.3 — raw stored value;
+            scoring derives period-over-period delta as
+            ``earnings_estimate_revision``)
+
 All written with upload_type='live'.
 """
 from __future__ import annotations
@@ -27,7 +35,6 @@ from __future__ import annotations
 import asyncio
 import os
 import logging
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -36,7 +43,6 @@ from dotenv import load_dotenv
 
 from db.queries.raw_signals import insert_signals
 from pipeline.rate_limits import (
-    EDGAR_SEM, EDGAR_DELAY,
     FINNHUB_SEM, FINNHUB_DELAY,
     guarded_get,
 )
@@ -48,166 +54,12 @@ load_dotenv(override=False)
 _FINNHUB_KEY = os.environ.get("FINNHUB_KEY", "")
 
 _FINNHUB_BASE    = "https://finnhub.io/api/v1"
-_EDGAR_TICKERS   = "https://www.sec.gov/files/company_tickers.json"
-_EDGAR_SUB       = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
-_EDGAR_DOC       = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nohyphen}/{filename}"
-
-# SEC requires a descriptive User-Agent for all requests
-_EDGAR_HEADERS = {
-    "User-Agent": "SentimentAPI admin@sentimentapi.local",
-    "Accept":     "application/json, application/xml",
-}
-
-# Lazy-loaded CIK map: ticker → CIK integer
-_cik_cache: dict[str, int] = {}
-_cik_lock = asyncio.Lock()
 
 _INSIDER_LOOKBACK_DAYS = 30
 
 
 # ---------------------------------------------------------------------------
-# EDGAR helpers
-# ---------------------------------------------------------------------------
-
-async def _load_cik_map(client: httpx.AsyncClient) -> None:
-    """Load full ticker-to-CIK mapping from EDGAR once per process."""
-    global _cik_cache
-    if _cik_cache:
-        return
-    async with _cik_lock:
-        # Double-check after acquiring lock — another coroutine may have loaded it
-        if _cik_cache:
-            return
-        resp = await guarded_get(
-            client, _EDGAR_TICKERS,
-            headers=_EDGAR_HEADERS,
-            sem=EDGAR_SEM, delay=EDGAR_DELAY, label="EDGAR CIK map",
-        )
-        if resp is None or resp.status_code != 200:
-            _log.warning("EDGAR CIK map unavailable (status=%s)", resp.status_code if resp else None)
-            return
-        try:
-            data = resp.json()
-            _cik_cache = {
-                v["ticker"].upper(): int(v["cik_str"])
-                for v in data.values()
-                if "ticker" in v and "cik_str" in v
-            }
-        except Exception as exc:
-            _log.warning("EDGAR CIK map parse error: %s", exc)
-
-
-async def _get_cik(ticker: str, client: httpx.AsyncClient) -> int | None:
-    await _load_cik_map(client)
-    return _cik_cache.get(ticker.upper())
-
-
-async def _fetch_form4_transactions(
-    ticker: str,
-    cik: int,
-    client: httpx.AsyncClient,
-) -> list[tuple]:
-    """
-    Fetch Form 4 filings from the last INSIDER_LOOKBACK_DAYS and parse
-    non-derivative transactions.
-
-    Returns list of (ticker, 'insider_net_shares', value, 'sec_edgar', 'live', timestamp).
-    """
-    rows: list[tuple] = []
-
-    # Step 1: fetch submissions JSON
-    resp = await guarded_get(
-        client, _EDGAR_SUB.format(cik=cik),
-        headers=_EDGAR_HEADERS,
-        sem=EDGAR_SEM, delay=EDGAR_DELAY, label=f"EDGAR submissions {ticker}",
-    )
-    if resp is None or resp.status_code != 200:
-        _log.warning("EDGAR submissions unavailable for %s (CIK %d)", ticker, cik)
-        return rows
-
-    try:
-        submissions = resp.json()
-    except Exception as exc:
-        _log.warning("EDGAR submissions parse error for %s: %s", ticker, exc)
-        return rows
-
-    recent = submissions.get("filings", {}).get("recent", {})
-    forms     = recent.get("form", [])
-    dates     = recent.get("filingDate", [])
-    accessions = recent.get("accessionNumber", [])
-    primary_docs = recent.get("primaryDocument", [])
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=_INSIDER_LOOKBACK_DAYS)
-
-    for form, date_str, acc, primary_doc in zip(forms, dates, accessions, primary_docs):
-        if form not in ("4", "4/A"):
-            continue
-
-        try:
-            filing_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-
-        if filing_date < cutoff:
-            break  # submissions are sorted descending; stop when past lookback
-
-        acc_nohyphen = acc.replace("-", "")
-        doc_url = _EDGAR_DOC.format(
-            cik=cik,
-            acc_nohyphen=acc_nohyphen,
-            filename=primary_doc,
-        )
-
-        # Step 2: fetch and parse the Form 4 XML
-        xml_resp = await guarded_get(
-            client, doc_url,
-            headers=_EDGAR_HEADERS,
-            sem=EDGAR_SEM, delay=EDGAR_DELAY, label=f"EDGAR Form4 {acc}",
-        )
-        if xml_resp is None or xml_resp.status_code != 200:
-            _log.warning("EDGAR Form 4 unavailable (%s)", acc)
-            continue
-
-        xml_text = xml_resp.text
-
-        try:
-            root = ET.fromstring(xml_text)
-        except ET.ParseError as exc:
-            # EDGAR sometimes wraps XML in SGML — log at debug, fallback handles it
-            _log.debug("EDGAR Form 4 XML parse error (%s): %s", acc, exc)
-            continue
-
-        # Iterate non-derivative transactions
-        for txn in root.findall(".//nonDerivativeTransaction"):
-            try:
-                date_el = txn.find(".//transactionDate/value")
-                shares_el = txn.find(".//transactionAmounts/transactionShares/value")
-                code_el = txn.find(
-                    ".//transactionAmounts/transactionAcquiredDisposedCode/value"
-                )
-
-                if date_el is None or shares_el is None or code_el is None:
-                    continue
-
-                txn_date = datetime.strptime(
-                    date_el.text.strip(), "%Y-%m-%d"
-                ).replace(tzinfo=timezone.utc)
-                shares = float(shares_el.text.strip())
-                code   = code_el.text.strip().upper()
-
-                # A = Acquired (positive), D = Disposed (negative)
-                net_shares = shares if code == "A" else -shares
-                rows.append(
-                    (ticker, "insider_net_shares", net_shares, "sec_edgar", "live", txn_date)
-                )
-            except (AttributeError, ValueError):
-                continue
-
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Finnhub insider transactions (fallback)
+# Finnhub insider transactions
 # ---------------------------------------------------------------------------
 
 async def _insider_finnhub(ticker: str, client: httpx.AsyncClient) -> list[tuple]:
@@ -366,17 +218,8 @@ async def _run_influencer(ticker: str, client: httpx.AsyncClient) -> None:
     now  = datetime.now(timezone.utc)
     rows: list[tuple] = []
 
-    # --- Insider transactions (primary: EDGAR, fallback: Finnhub) ---
-    cik = await _get_cik(ticker, client)
-    if cik is not None:
-        insider_rows = await _fetch_form4_transactions(ticker, cik, client)
-    else:
-        insider_rows = []
-
-    if not insider_rows:
-        insider_rows = await _insider_finnhub(ticker, client)
-
-    rows.extend(insider_rows)
+    # --- Insider transactions (Finnhub per paper Data Collection table) ---
+    rows.extend(await _insider_finnhub(ticker, client))
 
     # --- Analyst buy percentage ---
     buy_pct = await _analyst_recommendations(ticker, client)

@@ -94,9 +94,6 @@ class TestRunInfluencerTargetSource:
         async def _no_insider(*_a, **_kw):
             return []  # no insider data this tick
 
-        async def _no_cik(*_a, **_kw):
-            return None  # skip the EDGAR path entirely
-
         async def _analyst_pct(*_a, **_kw):
             return None  # not under test
 
@@ -108,7 +105,6 @@ class TestRunInfluencerTargetSource:
 
         client = MagicMock()
         with patch.object(influencer_src, "insert_signals", new=AsyncMock(side_effect=_capture_insert)), \
-             patch.object(influencer_src, "_get_cik", new=AsyncMock(side_effect=_no_cik)), \
              patch.object(influencer_src, "_insider_finnhub", new=AsyncMock(side_effect=_no_insider)), \
              patch.object(influencer_src, "_analyst_recommendations", new=AsyncMock(side_effect=_analyst_pct)), \
              patch.object(influencer_src, "_analyst_target_yf", new=AsyncMock(side_effect=_target_value)), \
@@ -313,9 +309,6 @@ class TestRunInfluencerEarningsRow:
         async def _none(*_a, **_kw):
             return None
 
-        async def _no_cik(*_a, **_kw):
-            return None
-
         async def _no_insider(*_a, **_kw):
             return []
 
@@ -324,7 +317,6 @@ class TestRunInfluencerEarningsRow:
 
         client = MagicMock()
         with patch.object(influencer_src, "insert_signals", new=AsyncMock(side_effect=_capture_insert)), \
-             patch.object(influencer_src, "_get_cik", new=AsyncMock(side_effect=_no_cik)), \
              patch.object(influencer_src, "_insider_finnhub", new=AsyncMock(side_effect=_no_insider)), \
              patch.object(influencer_src, "_analyst_recommendations", new=AsyncMock(side_effect=_none)), \
              patch.object(influencer_src, "_analyst_target_yf", new=AsyncMock(side_effect=_none)), \

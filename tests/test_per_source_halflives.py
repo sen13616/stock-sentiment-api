@@ -41,19 +41,12 @@ class TestGetHalfLife:
         """Influencer default (analyst signals) = 72h."""
         assert _get_half_life("influencer", "finnhub") == 72.0
 
-    def test_influencer_sec_edgar_override(self):
-        """SEC filings in influencer layer use 168h (7 days)."""
-        assert _get_half_life("influencer", "sec_edgar") == 168.0
-
     def test_macro_default(self):
         assert _get_half_life("macro", "computed") == 336.0
 
     def test_unknown_layer_fallback(self):
         """Unknown layer falls back to 48h."""
         assert _get_half_life("unknown", "yfinance") == 48.0
-
-    def test_case_insensitive_source(self):
-        assert _get_half_life("influencer", "SEC_EDGAR") == 168.0
 
 
 # ===========================================================================
@@ -149,13 +142,18 @@ class TestBuildWithHalfLives:
         expected_w = 0.75 * 0.5  # AV source weight = 0.75 (Sprint A)
         assert abs(sig["weight"] - expected_w) < 0.01
 
-    def test_influencer_sec_edgar_uses_168h(self):
-        """SEC-filed insider transaction 7 days old → weight ≈ 0.5 × channel_weight (1.00)."""
+    def test_influencer_insider_uses_168h_regardless_of_source(self):
+        """Insider transaction 7 days old → weight ≈ 0.5 × channel_weight (1.00).
+
+        Sprint P3.4 removed the `("influencer", "sec_edgar")` half-life override;
+        168h now comes from the signal-type-keyed `_INFLUENCER_SIGNAL_HALF_LIFE_H`
+        table (P3.1 I4) and applies for both Finnhub and SEC EDGAR insider rows.
+        """
         now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
         ts = now - timedelta(days=7)
-        sig = _build("insider_net_shares", 1000, 55.0, "sec_edgar", ts,
+        sig = _build("insider_net_shares", 1000, 55.0, "finnhub", ts,
                       "influencer", "AAPL", now)
-        # Sprint P3.1 I1: insider channel weight = 1.00; half-life override 168h applies.
+        # Sprint P3.1 I1: insider channel weight = 1.00.
         # w_author × w_conf = 1.0 × 1.0 (Sprint P3.1 I7/I15 scaffolds).
         expected_w = 1.0 * 0.5
         assert abs(sig["weight"] - expected_w) < 0.01
@@ -198,8 +196,13 @@ class TestHalfLifeValues:
     def test_macro_is_336h(self):
         assert _LAYER_HALF_LIFE_H["macro"] == 336.0
 
-    def test_sec_edgar_override_is_168h(self):
-        assert _HALF_LIFE_OVERRIDE[("influencer", "sec_edgar")] == 168.0
+    def test_half_life_override_empty_after_p3_4(self):
+        """Sprint P3.4: `("influencer", "sec_edgar")` override removed; dict now empty.
+
+        The 168h insider half-life is supplied by the signal-type-keyed
+        `_INFLUENCER_SIGNAL_HALF_LIFE_H` table (P3.1 I4), not by a source override.
+        """
+        assert _HALF_LIFE_OVERRIDE == {}
 
 
 # ===========================================================================
@@ -252,7 +255,7 @@ class TestInfluencerInsiderHalfLife:
         assert _get_half_life("influencer", "finnhub", "insider_net_shares") == 168.0
 
     def test_insider_sec_edgar_uses_168h(self):
-        """SEC EDGAR insider rows still 168h (now via signal-type override; source override still present harmlessly)."""
+        """SEC EDGAR insider rows: 168h via the signal-type table (the source-keyed override was removed in P3.4)."""
         assert _get_half_life("influencer", "sec_edgar", "insider_net_shares") == 168.0
 
     def test_analyst_buy_pct_still_72h(self):
