@@ -43,7 +43,10 @@ class SubIndexResult:
     sources: list[str] = field(default_factory=list, compare=False)
 
 
-def compute_sub_index(signals: list[dict]) -> SubIndexResult | None:
+def compute_sub_index(
+    signals: list[dict],
+    shrinkage_denominator: float = 5.0,
+) -> SubIndexResult | None:
     """
     Compute a layer sub-index from pre-scored, pre-weighted signal dicts.
 
@@ -54,6 +57,13 @@ def compute_sub_index(signals: list[dict]) -> SubIndexResult | None:
           - 'score'  (float) : 0–100, direction-corrected, 50 = neutral
           - 'weight' (float) : combined w_source × w_confidence × w_time
           - 'source' (str)   : data source label
+    shrinkage_denominator : float, default 5.0
+        Controls the volume-shrinkage curve: ``shrinkage = min(1, n / d)``.
+        Narrative / influencer use the default (5) per existing convention.
+        Macro layer overrides to 2 (Sprint P4.2 Decision 7 Option C) so that
+        2 present signals — the realistic floor before P4.3 adds FRED data —
+        already produce no shrinkage. P4.4 will replace this whole codepath
+        for macro with the dedicated ``compute_macro_sub_index``.
 
     Returns
     -------
@@ -70,7 +80,7 @@ def compute_sub_index(signals: list[dict]) -> SubIndexResult | None:
     raw = sum(s["score"] * s["weight"] for s in valid) / total_w
 
     n = len(valid)
-    shrinkage = min(1.0, n / 5)
+    shrinkage = min(1.0, n / shrinkage_denominator)
     value = 50.0 + shrinkage * (raw - 50.0)
 
     sources = sorted({s["source"] for s in valid})

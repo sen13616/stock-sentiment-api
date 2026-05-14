@@ -345,9 +345,12 @@ class TestZScoreConfig:
             assert _ZSCORE_CONFIG[sig].negate is False, f"{sig} should not be negated"
 
     def test_no_config_for_excluded_signals(self):
-        """Signals excluded from z-score should NOT be in _ZSCORE_CONFIG."""
-        # Sprint P3.2: analyst_target_price now HAS a z-score config (against upside, not raw price).
-        for sig in ("buy_pressure", "sell_pressure", "sector_etf_return_20d"):
+        """Signals excluded from z-score should NOT be in _ZSCORE_CONFIG.
+
+        Sprint P3.2: analyst_target_price now HAS a z-score config (against upside).
+        Sprint P4.2: sector_etf_return_20d now HAS a z-score config (per-ETF rolling).
+        """
+        for sig in ("buy_pressure", "sell_pressure"):
             assert sig not in _ZSCORE_CONFIG, f"{sig} should not have z-score config"
 
     def test_analyst_target_price_has_zscore_config(self):

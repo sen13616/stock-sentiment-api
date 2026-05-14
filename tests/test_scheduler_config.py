@@ -67,18 +67,24 @@ def test_scoring_tick_job_registered():
 
 
 async def test_scoring_tick_calls_score_all_for_active_tickers():
-    """scoring_tick_job must call _score_all with the full ticker list."""
+    """scoring_tick_job must call _score_all with the full ticker list + preloaded sector map (Sprint P4.2)."""
     mock_tickers = ["AAPL", "MSFT", "GOOGL"]
+    mock_sector_map = {
+        "AAPL":  "Information Technology",
+        "MSFT":  "Information Technology",
+        "GOOGL": "Communication Services",
+    }
 
     with (
         patch("pipeline.scheduler.get_active_tickers", new_callable=AsyncMock, return_value=mock_tickers),
+        patch("pipeline.scheduler.get_ticker_sector_map", new_callable=AsyncMock, return_value=mock_sector_map),
         patch("pipeline.scheduler._score_all", new_callable=AsyncMock, return_value=(3, 12)) as mock_score_all,
         patch("pipeline.scheduler._record_run", new_callable=AsyncMock),
     ):
         from pipeline.scheduler import scoring_tick_job
         await scoring_tick_job()
 
-    mock_score_all.assert_called_once_with(mock_tickers, "SCORING_TICK")
+    mock_score_all.assert_called_once_with(mock_tickers, "SCORING_TICK", sector_map=mock_sector_map)
 
 
 async def test_score_and_write_recomputes_all_four_layers():

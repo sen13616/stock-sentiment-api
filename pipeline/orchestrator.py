@@ -264,19 +264,51 @@ async def _score_influencer(
 
 
 async def _score_macro(
+    ticker: str,
+    sector: str | None,
     now: datetime,
     last_state: dict | None,
 ) -> tuple[SubIndexResult | None, list[dict], datetime | None]:
-    since  = now - _LAYER_LOOKBACK["macro"]
-    # Collect VIX + all sector ETF 20d returns in two queries (was 12)
+    """
+    Sprint P4.2: per-ticker macro scoring. VIX is the shared global signal;
+    the sector ETF component is routed via the ticker's GICS sector.
+
+    Tickers with ``sector IS NULL`` lose the ETF component and fall through
+    to a VIX-only macro (single-signal). The Decision 7 Option C shrinkage
+    override (``shrinkage_denominator=2``) prevents the resulting score
+    from being aggressively pulled toward 50 in that case.
+    """
+    from pipeline.sources.macro import SECTOR_ETFS
+
+    since = now - _LAYER_LOOKBACK["macro"]
+
+    # VIX — shared, single query under _MACRO_
     vix_rows = await get_signals_since(_MACRO_TICKER, since, ["vix"])
-    etf_batch = await get_signals_since_batch(_SECTOR_ETFS, since, ["sector_etf_return_20d"])
-    etf_rows: list[dict] = [r for rows in etf_batch.values() for r in rows]
+
+    # Sector ETF — per-ticker, resolved through the ticker's GICS sector
+    etf_rows: list[dict] = []
+    if sector is not None:
+        etf = SECTOR_ETFS.get(sector)
+        if etf is not None:
+            etf_rows = await get_signals_since(etf, since, ["sector_etf_return_20d"])
+        else:
+            _log.warning(
+                "_score_macro(%s): unknown GICS sector %r — skipping ETF component",
+                ticker, sector,
+            )
+    else:
+        _log.debug(
+            "_score_macro(%s): sector is NULL — skipping ETF component",
+            ticker,
+        )
 
     all_raw = vix_rows + etf_rows
     if all_raw:
-        sigs  = await score_macro_signals(all_raw, now)
-        si    = compute_sub_index(sigs)
+        sigs  = await score_macro_signals(ticker, sector, all_raw, now)
+        # Sprint P4.2 Decision 7 (Option C): macro uses min(1, n/2) shrinkage
+        # so 2 present signals already produce no shrinkage. P4.4 replaces
+        # this with the dedicated compute_macro_sub_index aggregator.
+        si    = compute_sub_index(sigs, shrinkage_denominator=2)
         as_of = _latest_ts(all_raw)
         if si is not None:
             return si, sigs, as_of
@@ -289,13 +321,25 @@ async def _score_macro(
 # Core compute + persist  (no external API calls)
 # ---------------------------------------------------------------------------
 
-async def _score_and_write(ticker: str) -> int:
+async def _score_and_write(ticker: str, sector: str | None = None) -> int:
     """
     Read all layers from DB, compute the full scored state, and persist it.
 
     Called by the global scoring tick job after ingestion jobs have written
     fresh data to the database.  All four layers are always recomputed from
     current DB state — no carry-forward.
+
+    Parameters
+    ----------
+    ticker : str
+        The ticker symbol to score.
+    sector : str | None
+        The ticker's GICS sector (Sprint P4.2). Passed in pre-resolved so
+        the per-ticker macro routing in ``_score_macro`` doesn't issue a
+        DB query per ticker per tick. The scoring tick job preloads the
+        full ticker→sector map once via ``get_ticker_sector_map()`` and
+        threads it through here. ``None`` is valid and produces a
+        VIX-only macro sub-index for that ticker.
 
     Returns
     -------
@@ -316,7 +360,7 @@ async def _score_and_write(ticker: str) -> int:
     (market_si, market_sigs, market_as_of) = await _score_market(ticker, now, last_state)
     (narrative_si, narrative_sigs, narrative_as_of) = await _score_narrative(ticker, now, last_state)
     (influencer_si, influencer_sigs, influencer_as_of, analyst_as_of, insider_as_of) = await _score_influencer(ticker, now, last_state, current_price)
-    (macro_si, macro_sigs, macro_as_of) = await _score_macro(now, last_state)
+    (macro_si, macro_sigs, macro_as_of) = await _score_macro(ticker, sector, now, last_state)
 
     sub_indices: dict = {
         "market":     market_si,
