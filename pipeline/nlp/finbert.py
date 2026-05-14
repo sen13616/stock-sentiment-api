@@ -89,12 +89,14 @@ def score_text(text: str) -> dict:
     }
 
 
-def score_batch(texts: list[str]) -> list[dict]:
+def score_batch(texts: list[str], batch_size: int = 32) -> list[dict]:
     """
     Score a batch of text strings with FinBERT.
 
-    Efficient for batches of 10–500 articles. Uses padding and processes
-    the full batch in a single forward pass.
+    Processes `texts` in fixed-size chunks (default 32) to bound peak
+    transient activation memory. Padding is applied per-chunk via the
+    tokenizer's `padding=True`, so a single long article only pads its own
+    chunk rather than the entire input.
 
     Returns
     -------
@@ -107,29 +109,33 @@ def score_batch(texts: list[str]) -> list[dict]:
     import torch  # noqa: PLC0415
 
     model, tokenizer = _get_model()
-    inputs = tokenizer(
-        texts,
-        return_tensors="pt",
-        truncation=True,
-        max_length=512,
-        padding=True,
-    )
-    if next(model.parameters()).is_cuda:
-        inputs = {k: v.cuda() for k, v in inputs.items()}
+    on_cuda = next(model.parameters()).is_cuda
 
-    with torch.no_grad():
-        logits = model(**inputs).logits
-    probs = torch.softmax(logits, dim=1)
+    results: list[dict] = []
+    for start in range(0, len(texts), batch_size):
+        chunk = texts[start:start + batch_size]
+        inputs = tokenizer(
+            chunk,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+            padding=True,
+        )
+        if on_cuda:
+            inputs = {k: v.cuda() for k, v in inputs.items()}
 
-    results = []
-    for i in range(len(texts)):
-        pos = probs[i][_POS_IDX].item()
-        neg = probs[i][_NEG_IDX].item()
-        neu = probs[i][_NEU_IDX].item()
-        results.append({
-            "finbert_score": pos - neg,
-            "finbert_pos": pos,
-            "finbert_neg": neg,
-            "finbert_neu": neu,
-        })
+        with torch.inference_mode():
+            logits = model(**inputs).logits
+        probs = torch.softmax(logits, dim=1)
+
+        for i in range(len(chunk)):
+            pos = probs[i][_POS_IDX].item()
+            neg = probs[i][_NEG_IDX].item()
+            neu = probs[i][_NEU_IDX].item()
+            results.append({
+                "finbert_score": pos - neg,
+                "finbert_pos": pos,
+                "finbert_neg": neg,
+                "finbert_neu": neu,
+            })
     return results

@@ -207,30 +207,49 @@ async def set_cluster_ids(article_ids: list[int], cluster_id: str) -> None:
 async def get_unscored_articles(
     since_hours: float = 48.0,
     language: str = "en",
+    limit: int | None = None,
 ) -> list[dict]:
     """
     Return articles that have not yet been scored by FinBERT.
 
     Filters to the specified language (default: English) and returns
-    articles where finbert_score IS NULL.
+    articles where finbert_score IS NULL.  When `limit` is supplied, caps
+    the result set to that many rows (oldest first, so a backlog is
+    drained in publication order across successive job cycles).
 
     Returns list of dicts with keys: id, title, summary, source.
     """
     since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, title, summary, source
-            FROM raw_articles
-            WHERE published_at    >= $1
-              AND finbert_score IS NULL
-              AND language         = $2
-            ORDER BY published_at ASC
-            """,
-            since,
-            language,
-        )
+        if limit is None:
+            rows = await conn.fetch(
+                """
+                SELECT id, title, summary, source
+                FROM raw_articles
+                WHERE published_at    >= $1
+                  AND finbert_score IS NULL
+                  AND language         = $2
+                ORDER BY published_at ASC
+                """,
+                since,
+                language,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, title, summary, source
+                FROM raw_articles
+                WHERE published_at    >= $1
+                  AND finbert_score IS NULL
+                  AND language         = $2
+                ORDER BY published_at ASC
+                LIMIT $3
+                """,
+                since,
+                language,
+                limit,
+            )
     return [dict(r) for r in rows]
 
 

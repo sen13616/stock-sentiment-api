@@ -419,7 +419,7 @@ async def narrative_job() -> None:
     n_scored = 0
 
     try:
-        unscored = await get_unscored_articles(since_hours=48.0, language="en")
+        unscored = await get_unscored_articles(since_hours=48.0, language="en", limit=500)
         if unscored:
             texts = [
                 (a["title"] or "") + " " + (a["summary"] or "")
