@@ -205,3 +205,127 @@ class TestPerTickerDistinctness:
         assert si_aapl is not None and si_xom is not None
         # Materially different — the gap should be ≥ 10 points
         assert (si_aapl.value - si_xom.value) > 10.0
+
+
+# ===========================================================================
+# 5. Sprint P4.3 — FRED Treasury / yield-curve signals
+# ===========================================================================
+
+from pipeline.features.normalize import (  # noqa: E402
+    _score_treasury_10y, _score_treasury_2y, _score_ted_spread,
+    _MACRO_GLOBAL_TYPES, _MACRO_RECOGNISED_TYPES,
+)
+
+
+class TestFredParametricScorers:
+
+    def test_treasury_10y_neutral_at_four_pct(self):
+        assert _score_treasury_10y(4.0) == pytest.approx(50.0)
+
+    def test_treasury_10y_bearish_when_rates_rise(self):
+        # 5.5% (one half-life above neutral) → ~25 (bearish)
+        assert 10.0 < _score_treasury_10y(5.5) < 40.0
+
+    def test_treasury_10y_bullish_when_rates_fall(self):
+        # 2.5% (one half-life below neutral) → ~75 (bullish)
+        assert 60.0 < _score_treasury_10y(2.5) < 90.0
+
+    def test_treasury_10y_clamps_at_extremes(self):
+        # tanh saturates asymptotically — within 1e-5 of the bound is fine
+        assert _score_treasury_10y(20.0) == pytest.approx(0.0, abs=1e-5)
+        assert _score_treasury_10y(-20.0) == pytest.approx(100.0, abs=1e-5)
+
+    def test_treasury_2y_neutral_at_four_five(self):
+        assert _score_treasury_2y(4.5) == pytest.approx(50.0)
+
+    def test_treasury_2y_bearish_when_rates_rise(self):
+        assert 10.0 < _score_treasury_2y(6.0) < 40.0
+
+    def test_ted_spread_neutral_at_zero(self):
+        assert _score_ted_spread(0.0) == pytest.approx(50.0)
+
+    def test_ted_spread_bearish_when_inverted(self):
+        # Inversion (negative slope) → bearish
+        assert _score_ted_spread(-1.0) < 30.0
+
+    def test_ted_spread_bullish_when_steep(self):
+        assert _score_ted_spread(+1.0) > 70.0
+
+
+class TestFredZScoreConfig:
+
+    def test_treasury_10y_has_zscore_config(self):
+        assert "treasury_yield_10y" in _ZSCORE_CONFIG
+        cfg = _ZSCORE_CONFIG["treasury_yield_10y"]
+        assert cfg.window == 90
+        assert cfg.negate is True   # rising yields = bearish
+
+    def test_treasury_2y_has_zscore_config(self):
+        assert "treasury_yield_2y" in _ZSCORE_CONFIG
+        cfg = _ZSCORE_CONFIG["treasury_yield_2y"]
+        assert cfg.window == 90
+        assert cfg.negate is True
+
+    def test_ted_spread_has_zscore_config(self):
+        assert "ted_spread" in _ZSCORE_CONFIG
+        cfg = _ZSCORE_CONFIG["ted_spread"]
+        assert cfg.window == 90
+        assert cfg.negate is True
+
+
+class TestFredScoringIntegration:
+
+    @pytest.mark.asyncio
+    async def test_fred_signals_recognised_by_score_macro_signals(self):
+        """FRED rows enter the macro scoring path and produce scored output."""
+        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
+            scored = await score_macro_signals(
+                ticker="AAPL", sector="Information Technology",
+                raw=[
+                    _row("vix",                4.0,  source="yfinance"),  # neutral-ish
+                    _row("treasury_yield_10y", 4.0,  source="fred"),       # neutral
+                    _row("treasury_yield_2y",  4.5,  source="fred"),       # neutral
+                    _row("ted_spread",         0.0,  source="fred"),       # neutral
+                ],
+                now=_ts(),
+            )
+        types = {s["signal_type"] for s in scored}
+        assert "treasury_yield_10y" in types
+        assert "treasury_yield_2y"  in types
+        assert "ted_spread"         in types
+        assert "vix"                in types
+
+    @pytest.mark.asyncio
+    async def test_fred_history_lookup_keyed_by_macro_ticker(self):
+        """FRED z-score history must be fetched under '_MACRO_', not the user ticker."""
+        history_calls: list[tuple] = []
+
+        async def _fake_history(ticker, signal_type, limit):
+            history_calls.append((ticker, signal_type, limit))
+            return []
+
+        with patch("db.queries.raw_signals.get_signal_history", new=_fake_history):
+            await score_macro_signals(
+                ticker="AAPL", sector="Information Technology",
+                raw=[
+                    _row("treasury_yield_10y", 4.0, source="fred"),
+                    _row("treasury_yield_2y",  4.5, source="fred"),
+                    _row("ted_spread",         0.0, source="fred"),
+                ],
+                now=_ts(),
+            )
+
+        fred_calls = [c for c in history_calls
+                      if c[1] in ("treasury_yield_10y", "treasury_yield_2y", "ted_spread")]
+        assert len(fred_calls) == 3
+        for c in fred_calls:
+            assert c[0] == "_MACRO_", f"FRED history must use _MACRO_, got {c[0]!r}"
+
+    def test_macro_global_types_include_fred(self):
+        """The _MACRO_GLOBAL_TYPES set must include all 3 FRED signal types."""
+        assert "treasury_yield_10y" in _MACRO_GLOBAL_TYPES
+        assert "treasury_yield_2y"  in _MACRO_GLOBAL_TYPES
+        assert "ted_spread"         in _MACRO_GLOBAL_TYPES
+        assert "vix"                in _MACRO_GLOBAL_TYPES
+        # And recognised
+        assert _MACRO_GLOBAL_TYPES <= _MACRO_RECOGNISED_TYPES

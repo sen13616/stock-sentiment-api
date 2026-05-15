@@ -66,6 +66,40 @@ def test_scoring_tick_job_registered():
     assert job.trigger.interval.total_seconds() == 30 * 60
 
 
+# ---------------------------------------------------------------------------
+# Sprint P4.3 — macro scheduler split
+# ---------------------------------------------------------------------------
+
+def test_macro_daily_job_registered():
+    """macro_daily job (FRED Treasury) must run once daily at 02:00 UTC."""
+    from pipeline.scheduler import scheduler
+
+    job = scheduler.get_job("macro_daily")
+    assert job is not None, "macro_daily job not found in scheduler"
+    # CronTrigger fields are CronTriggerField objects; stringify to check
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"]   == "2"
+    assert fields["minute"] == "0"
+
+
+def test_macro_intraday_job_registered():
+    """macro_intraday job (VIX + ETFs) must run hourly weekdays 14:00–20:00 UTC."""
+    from pipeline.scheduler import scheduler
+
+    job = scheduler.get_job("macro_intraday")
+    assert job is not None, "macro_intraday job not found in scheduler"
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["day_of_week"] == "mon-fri"
+    assert fields["hour"]        == "14-20"
+    assert fields["minute"]      == "0"
+
+
+def test_legacy_macro_job_no_longer_registered():
+    """The pre-P4.3 single `macro` job id is gone — replaced by daily + intraday."""
+    from pipeline.scheduler import scheduler
+    assert scheduler.get_job("macro") is None
+
+
 async def test_scoring_tick_calls_score_all_for_active_tickers():
     """scoring_tick_job must call _score_all with the full ticker list + preloaded sector map (Sprint P4.2)."""
     mock_tickers = ["AAPL", "MSFT", "GOOGL"]

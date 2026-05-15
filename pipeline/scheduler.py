@@ -15,7 +15,8 @@ Ingestion jobs:
     market_eod_job   — weekdays 21:15 UTC (data only, captures closing prices)
     narrative_job    — every 30 minutes (data only)
     influencer_job   — every 6 hours (data only)
-    macro_job        — daily at 02:00 UTC (data only)
+    macro_daily_job    — daily at 02:00 UTC (FRED Treasury signals, data only)
+    macro_intraday_job — hourly weekdays 14:00–20:00 UTC (VIX + sector ETFs, data only)
     short_volume_job — weekdays at 21:30 UTC (FINRA REGSHO, data only)
 
 Scoring job:
@@ -49,6 +50,7 @@ from db.redis import get_redis
 from pipeline.features.normalize import log_scoring_telemetry, reset_scoring_telemetry
 from pipeline.orchestrator import _score_and_write
 from pipeline.rate_limits import job_counters
+from pipeline.sources.fred import fetch_fred_signals
 from pipeline.sources.influencer import fetch_influencer_signals
 from pipeline.sources.macro import fetch_macro_signals
 from pipeline.sources.market import fetch_market_signals
@@ -489,28 +491,57 @@ async def influencer_job() -> None:
     )
 
 
-async def macro_job() -> None:
+async def macro_daily_job() -> None:
     """
-    Macro layer job — daily at 02:00 UTC.
+    Macro daily job — runs once per day at 02:00 UTC. Sprint P4.3.
 
-    Data-only: fetches VIX and sector ETF data once (global, not
-    per-ticker) and writes to DB.  Scoring is handled by the global
-    scoring_tick_job.
+    Fetches the three FRED Treasury / yield-curve signals (10y, 2y, TED
+    substitute) and writes them under `_MACRO_`. VIX and sector ETF data
+    are now fetched on an intraday cadence by ``macro_intraday_job``.
+
+    Data-only: scoring is handled by the global ``scoring_tick_job``.
     """
     job_counters.reset()
     t_start = time.monotonic()
-    _log.info("macro_job: starting")
+    _log.info("macro_daily_job: starting")
+
+    n_rows = 0
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            n_rows = await fetch_fred_signals(client)
+        except Exception as exc:
+            _log.warning("macro_daily_job: FRED fetch failed: %s", exc, exc_info=True)
+
+    await _record_run("macro_daily")
+
+    elapsed = time.monotonic() - t_start
+    _log.info("macro_daily_job complete: %d FRED rows in %.1fs", n_rows, elapsed)
+
+
+async def macro_intraday_job() -> None:
+    """
+    Macro intraday job — hourly weekdays 14:00–20:00 UTC. Sprint P4.3.
+
+    Fetches VIX + the 11 sector ETF closes / 20-day returns on every
+    trading-hour tick, matching the paper's hourly-during-market-hours
+    cadence for these market-state signals.
+
+    Data-only: scoring is handled by the global ``scoring_tick_job``.
+    """
+    job_counters.reset()
+    t_start = time.monotonic()
+    _log.info("macro_intraday_job: starting")
 
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             await fetch_macro_signals(client)
         except Exception as exc:
-            _log.warning("macro_job: macro fetch failed: %s", exc, exc_info=True)
+            _log.warning("macro_intraday_job: macro fetch failed: %s", exc, exc_info=True)
 
-    await _record_run("macro")
+    await _record_run("macro_intraday")
 
     elapsed = time.monotonic() - t_start
-    _log.info("macro_job complete in %.1fs", elapsed)
+    _log.info("macro_intraday_job complete in %.1fs", elapsed)
 
 
 async def short_volume_job() -> None:
@@ -632,13 +663,23 @@ scheduler.add_job(
 )
 
 scheduler.add_job(
-    macro_job,
+    macro_daily_job,
     trigger=CronTrigger(hour=2, minute=0),
-    id="macro",
-    name="Macro context (daily 02:00 UTC)",
+    id="macro_daily",
+    name="Macro daily (FRED Treasury, 02:00 UTC)",
     max_instances=1,
     coalesce=True,
     misfire_grace_time=600,
+)
+
+scheduler.add_job(
+    macro_intraday_job,
+    trigger=CronTrigger(day_of_week="mon-fri", hour="14-20", minute=0),
+    id="macro_intraday",
+    name="Macro intraday (VIX + ETFs, hourly weekdays 14:00–20:00 UTC)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=300,
 )
 
 scheduler.add_job(

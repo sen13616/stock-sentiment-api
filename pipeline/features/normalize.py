@@ -254,6 +254,12 @@ _ZSCORE_CONFIG: dict[str, RollingZScorer] = {
     # symbol (XLK, XLE, …), not the ticker being scored. ~22 daily obs per
     # ETF today → parametric fallback runs for ~3 more weeks.
     "sector_etf_return_20d":  RollingZScorer(window=90),
+    # Sprint P4.3: FRED Treasury / yield-curve signals. All sign-inverted —
+    # rising yields and widening spreads are bearish for equities. Stored
+    # under `_MACRO_` alongside VIX, so history lookup uses the same ticker.
+    "treasury_yield_10y":     RollingZScorer(window=90, negate=True),
+    "treasury_yield_2y":      RollingZScorer(window=90, negate=True),
+    "ted_spread":             RollingZScorer(window=90, negate=True),
 }
 
 
@@ -369,6 +375,36 @@ def _score_vix(vix: float) -> float:
     return max(0.0, min(100.0, 50.0 - (vix - 22.0) / 8.0 * 25.0))
 
 
+def _score_treasury_10y(yield_pct: float) -> float:
+    """10-year Treasury yield. Rising yields = bearish for equities.
+
+    Parametric cold-start fallback (Sprint P4.3). Neutral at 4.0%
+    (approx. mid-2026 normal range), half-scale at ±1.5% deviation.
+    Z-score path engages once 90-day history is available.
+    """
+    return max(0.0, min(100.0, 50.0 - 50.0 * math.tanh((yield_pct - 4.0) / 1.5)))
+
+
+def _score_treasury_2y(yield_pct: float) -> float:
+    """2-year Treasury yield. Rising yields = bearish for equities.
+
+    Parametric cold-start fallback. Neutral at 4.5% (front-end runs
+    slightly hotter than the 10y under normal Fed regimes), half-scale
+    at ±1.5% deviation.
+    """
+    return max(0.0, min(100.0, 50.0 - 50.0 * math.tanh((yield_pct - 4.5) / 1.5)))
+
+
+def _score_ted_spread(slope_pct: float) -> float:
+    """TED spread substitute = 10y − 2y yield-curve slope.
+
+    Negative slope (inversion) is the canonical recession signal →
+    bearish for equities. We treat slope > 0 as bullish, slope < 0
+    as bearish, with tanh saturation at ±1.0%.
+    """
+    return max(0.0, min(100.0, 50.0 + 50.0 * math.tanh(slope_pct / 1.0)))
+
+
 # Lookup table for simple (single-argument) scorers
 _SIMPLE_SCORERS: dict[str, object] = {
     "rsi_14":               _score_rsi,
@@ -386,6 +422,10 @@ _SIMPLE_SCORERS: dict[str, object] = {
     "analyst_buy_pct":      _score_analyst_buy_pct,
     "vix":                  _score_vix,
     "sector_etf_return_20d": lambda v: _score_return(v, 0.10),
+    # Sprint P4.3 — FRED Treasury / yield-curve signals
+    "treasury_yield_10y":   _score_treasury_10y,
+    "treasury_yield_2y":    _score_treasury_2y,
+    "ted_spread":           _score_ted_spread,
 }
 
 
@@ -723,6 +763,23 @@ async def score_influencer_signals(
     return result
 
 
+#: Macro signals stored as global rows under '_MACRO_'. Their z-score
+#: history lookup uses '_MACRO_' regardless of which ticker is being
+#: scored. Updated for Sprint P4.3 (FRED Treasury + yield-curve signals).
+_MACRO_GLOBAL_TYPES: frozenset[str] = frozenset({
+    "vix",
+    "treasury_yield_10y",
+    "treasury_yield_2y",
+    "ted_spread",
+})
+
+#: All signal types that the macro scoring path recognises. Anything else
+#: in the raw row list is silently ignored.
+_MACRO_RECOGNISED_TYPES: frozenset[str] = _MACRO_GLOBAL_TYPES | frozenset({
+    "sector_etf_return_20d",
+})
+
+
 async def score_macro_signals(
     ticker: str,
     sector: str | None,
@@ -730,13 +787,16 @@ async def score_macro_signals(
     now: datetime,
 ) -> list[dict]:
     """
-    Convert raw macro signal rows (VIX + sector ETF returns) to scored dicts.
+    Convert raw macro signal rows to scored dicts.
 
-    Sprint P4.2: the macro layer is now per-ticker. VIX remains a shared
-    global signal (history under `_MACRO_`); the sector ETF return is
+    Sprint P4.2: per-ticker macro. VIX and the FRED signals (Sprint P4.3:
+    treasury_yield_10y / treasury_yield_2y / ted_spread) remain shared
+    global signals — history under `_MACRO_`. The sector ETF return is
     z-scored against the relevant ETF's own history, looked up via the
     ticker's GICS sector. If the ticker has `sector IS NULL` the ETF
-    component is silently dropped and weight redistribution absorbs.
+    component is silently dropped; the macro shrinkage stopgap (P4.2
+    Decision 7 Option C, denominator=2) prevents the resulting score
+    from being aggressively pulled toward 50.
 
     Parameters
     ----------
@@ -754,7 +814,7 @@ async def score_macro_signals(
     by_type: dict[str, list[dict]] = {}
     for row in raw:
         sig_type = row["signal_type"]
-        if sig_type not in ("vix", "sector_etf_return_20d"):
+        if sig_type not in _MACRO_RECOGNISED_TYPES:
             continue
         by_type.setdefault(sig_type, []).append(row)
 
@@ -765,13 +825,13 @@ async def score_macro_signals(
             continue
 
         # History lookup ticker depends on the signal type:
-        # • VIX                    → stored under '_MACRO_'
-        # • sector_etf_return_20d  → stored under the ETF symbol;
-        #                            resolve from the ticker's GICS sector
+        # • Global macro types (VIX + FRED)  → stored under '_MACRO_'
+        # • sector_etf_return_20d            → stored under the ETF symbol;
+        #                                      resolve from the ticker's GICS sector
         history: list[float] | None = None
         history_ticker: str | None = None
         if zscore_cfg is not None:
-            if sig_type == "vix":
+            if sig_type in _MACRO_GLOBAL_TYPES:
                 history_ticker = "_MACRO_"
             elif sig_type == "sector_etf_return_20d" and sector is not None:
                 history_ticker = SECTOR_ETFS.get(sector)

@@ -60,6 +60,12 @@ POLYGON_DELAY = 0.85
 #: servers or the event loop's thread pool.
 YF_INFO_SEM = asyncio.Semaphore(10)
 
+#: FRED (St. Louis Fed): documented 120 req/min with API key. The macro
+#: daily job makes 3 calls; the optional backfill makes 3 × 90 = 270 calls
+#: spread over ~5 minutes. Conservative settings keep us well clear.
+FRED_SEM   = asyncio.Semaphore(2)
+FRED_DELAY = 0.5
+
 # Auth-failure status codes: do not consume the provider's rate-limit quota.
 _AUTH_FAIL_CODES: frozenset[int] = frozenset((403, 404))
 _BRIEF_DELAY: float = 0.05     # courtesy pause for auth failures

@@ -111,7 +111,22 @@ _INFLUENCER_SIGNAL_TYPES = [
     "insider_net_shares", "analyst_buy_pct", "analyst_target_price",
     "analyst_eps_estimate_mean",
 ]
-_MACRO_SIGNAL_TYPES = ["vix", "sector_etf_return_20d"]
+_MACRO_SIGNAL_TYPES = [
+    "vix",
+    "sector_etf_return_20d",
+    # Sprint P4.3 — FRED Treasury / yield-curve signals (stored under _MACRO_)
+    "treasury_yield_10y",
+    "treasury_yield_2y",
+    "ted_spread",
+]
+#: Subset of macro signal types stored under `_MACRO_` (i.e. NOT per-ticker).
+#: Used by `_score_macro` to issue a single batched fetch for all global rows.
+_MACRO_GLOBAL_SIGNAL_TYPES = [
+    "vix",
+    "treasury_yield_10y",
+    "treasury_yield_2y",
+    "ted_spread",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +297,9 @@ async def _score_macro(
 
     since = now - _LAYER_LOOKBACK["macro"]
 
-    # VIX — shared, single query under _MACRO_
-    vix_rows = await get_signals_since(_MACRO_TICKER, since, ["vix"])
+    # Global macro signals — single batched query under _MACRO_.
+    # Sprint P4.3 expanded this from VIX-only to VIX + 3 FRED Treasury signals.
+    global_rows = await get_signals_since(_MACRO_TICKER, since, _MACRO_GLOBAL_SIGNAL_TYPES)
 
     # Sector ETF — per-ticker, resolved through the ticker's GICS sector
     etf_rows: list[dict] = []
@@ -302,7 +318,7 @@ async def _score_macro(
             ticker,
         )
 
-    all_raw = vix_rows + etf_rows
+    all_raw = global_rows + etf_rows
     if all_raw:
         sigs  = await score_macro_signals(ticker, sector, all_raw, now)
         # Sprint P4.2 Decision 7 (Option C): macro uses min(1, n/2) shrinkage
