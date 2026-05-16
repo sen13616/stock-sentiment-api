@@ -14,7 +14,7 @@ import hashlib
 from fastapi import HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from db.queries.api_keys import get_key_tier
+from scripts.db.queries.api_keys import get_key_tier
 
 _bearer = HTTPBearer(auto_error=False)
 

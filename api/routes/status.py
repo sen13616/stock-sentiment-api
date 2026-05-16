@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter
 
 from api.response.schemas import StatusResponse
-from db.redis import get_redis
+from scripts.db.redis import get_redis
 from pipeline.confidence.staleness import is_market_hours
 
 router = APIRouter()

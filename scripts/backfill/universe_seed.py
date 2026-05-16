@@ -7,9 +7,9 @@ import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from db.connection import close_pool, get_pool, init_pool
+from scripts.db.connection import close_pool, get_pool, init_pool
 
 # --------------------------------------------------------------------------- #
 # S&P 500 universe — hardcoded snapshot (April 2024 composition).              #

@@ -145,7 +145,7 @@ class TestAnalystTargetPriceZScorePath:
         # current_target = 110 → upside = +0.10; historical upsides centered near 0 → strongly bullish z
         current_target = 110.0
 
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_row(current_target)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -167,7 +167,7 @@ class TestAnalystTargetPriceZScorePath:
         current_price = 100.0
         current_target = 105.0  # +5% upside; historical upsides centered near +20% → bearish
 
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_row(current_target)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -183,7 +183,7 @@ class TestAnalystTargetPriceZScorePath:
         current_price = 100.0
         current_target = 110.0  # +10% upside → parametric ≈ 50 + 50*tanh(0.10/0.15) ≈ 79
 
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_row(current_target)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -198,7 +198,7 @@ class TestAnalystTargetPriceZScorePath:
         """current_price=None → can't compute upside → parametric path also returns None → row skipped."""
         history = [100.0] * 60
 
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_row(110.0)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -211,7 +211,7 @@ class TestAnalystTargetPriceZScorePath:
         """When z-score path succeeds, telemetry records 'zscore', not 'parametric_fallback'."""
         history = [100.0 + (i % 5) for i in range(60)]
         nm.reset_scoring_telemetry()
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             await nm.score_influencer_signals(
                 "TEST", [_row(110.0)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -362,7 +362,7 @@ class TestEarningsRevisionDeltaPath:
         """With one prior obs in history, scoring emits earnings_estimate_revision."""
         # history is oldest-first; newest entry == current value (just written)
         history = [1.50, 1.65]  # prior=1.50, current=1.65 → delta = +10%
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_eps_row(1.65)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -383,7 +383,7 @@ class TestEarningsRevisionDeltaPath:
     async def test_revision_skipped_when_history_too_short(self):
         """First-ever obs: no prior in history → revision not emitted."""
         history = [1.65]  # only the just-written value, no prior
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_eps_row(1.65)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -394,7 +394,7 @@ class TestEarningsRevisionDeltaPath:
     async def test_revision_skipped_when_prior_is_zero(self):
         """Prior obs == 0 would cause div-by-zero; signal must be skipped."""
         history = [0.0, 1.50]
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_eps_row(1.50)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -404,7 +404,7 @@ class TestEarningsRevisionDeltaPath:
     @pytest.mark.asyncio
     async def test_revision_bearish_on_downward_revision(self):
         history = [2.00, 1.80]  # delta = -10%
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_eps_row(1.80)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -423,7 +423,7 @@ class TestEarningsRevisionDeltaPath:
         history = base + [base[-1] * 1.20]  # final step is +20% — the "current" obs
         nm.reset_scoring_telemetry()
 
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             scored = await nm.score_influencer_signals(
                 "TEST", [_eps_row(history[-1])],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
@@ -442,7 +442,7 @@ class TestEarningsRevisionDeltaPath:
         history = [1.00, 1.10]  # only 2 obs → 0 entries in delta_history → parametric
         nm.reset_scoring_telemetry()
 
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=history)):
             await nm.score_influencer_signals(
                 "TEST", [_eps_row(1.10)],
                 now=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),

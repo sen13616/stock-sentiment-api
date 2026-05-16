@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 
 import asyncpg
 
-from db.connection import get_pool
+from scripts.db.connection import get_pool
 
 
 async def insert_row(

@@ -28,9 +28,9 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from db.connection import close_pool, get_pool, init_pool
+from scripts.db.connection import close_pool, get_pool, init_pool
 
 load_dotenv(override=False)
 

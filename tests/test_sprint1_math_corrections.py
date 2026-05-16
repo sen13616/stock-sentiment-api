@@ -106,7 +106,7 @@ def _make_ts():
 
 
 # Mock get_signal_history to return [] so z-score falls back to parametric
-_mock_history = patch("db.queries.raw_signals.get_signal_history",
+_mock_history = patch("scripts.db.queries.raw_signals.get_signal_history",
                       new_callable=AsyncMock, return_value=[])
 
 

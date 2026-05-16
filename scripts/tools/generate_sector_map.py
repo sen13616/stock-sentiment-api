@@ -23,12 +23,12 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import yfinance as yf
 
 from pipeline.sources.macro import SECTOR_ETFS
-from tools.company_names import COMPANY_NAMES  # noqa: E402
+from scripts.tools.company_names import COMPANY_NAMES  # noqa: E402
 
 VALID_SECTORS = set(SECTOR_ETFS.keys())
 OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "sector_map.py")

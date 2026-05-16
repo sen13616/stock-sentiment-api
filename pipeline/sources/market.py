@@ -35,7 +35,7 @@ _log = logging.getLogger(__name__)
 import httpx
 from dotenv import load_dotenv
 
-from db.queries.raw_signals import (
+from scripts.db.queries.raw_signals import (
     get_close_history,
     get_volume_history,
     insert_signals,

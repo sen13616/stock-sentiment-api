@@ -5,7 +5,7 @@ All ticker_universe table operations.
 """
 from __future__ import annotations
 
-from db.connection import get_pool
+from scripts.db.connection import get_pool
 
 
 async def get_active_tickers() -> list[str]:

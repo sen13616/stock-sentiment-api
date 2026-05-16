@@ -284,7 +284,7 @@ class TestGetArticlesSinceDedup:
         unclustered articles (NULL cluster ID) are each treated as unique
         rows. Verify the SQL contains this expression.
         """
-        from db.queries.raw_articles import get_articles_since
+        from scripts.db.queries.raw_articles import get_articles_since
         import inspect
         source = inspect.getsource(get_articles_since)
 
@@ -301,7 +301,7 @@ class TestGetArticlesSinceDedup:
         This test verifies the SQL logic at the query layer level by checking
         that the SQL string contains the DISTINCT ON clause.
         """
-        from db.queries.raw_articles import get_articles_since
+        from scripts.db.queries.raw_articles import get_articles_since
         import inspect
         source = inspect.getsource(get_articles_since)
         assert "DISTINCT ON" in source, "get_articles_since must use DISTINCT ON for cluster dedup"
@@ -320,7 +320,7 @@ class TestGetArticlesSinceDedup:
         This test verifies the SQL ordering: WHERE filters first, then DISTINCT ON
         picks from the remaining (FinBERT-scored) rows.
         """
-        from db.queries.raw_articles import get_articles_since
+        from scripts.db.queries.raw_articles import get_articles_since
         import inspect
         source = inspect.getsource(get_articles_since)
 
@@ -338,7 +338,7 @@ class TestGetArticlesSinceDedup:
 
     async def test_query_returns_expected_columns(self):
         """get_articles_since returns dicts with the expected keys."""
-        from db.queries.raw_articles import get_articles_since
+        from scripts.db.queries.raw_articles import get_articles_since
         import inspect
         source = inspect.getsource(get_articles_since)
         # Must select these columns for score_narrative_signals compatibility
@@ -371,7 +371,7 @@ class TestNarrativeJobClustering:
             patch("pipeline.scheduler._fetch_all_tickers", new_callable=AsyncMock),
             patch("pipeline.scheduler.cluster_articles", side_effect=_mock_cluster),
             patch("pipeline.scheduler._record_run", new_callable=AsyncMock),
-            patch("db.queries.raw_articles.count_unclustered_articles", new_callable=AsyncMock, return_value=0),
+            patch("scripts.db.queries.raw_articles.count_unclustered_articles", new_callable=AsyncMock, return_value=0),
             patch("pipeline.scheduler._get_cluster_telemetry", new_callable=AsyncMock, return_value={
                 "cross_source_clusters": 0, "same_source_clusters": 0, "largest_cluster_size": 0,
             }),
@@ -400,7 +400,7 @@ class TestNarrativeJobClustering:
             patch("pipeline.scheduler._fetch_all_tickers", new_callable=AsyncMock),
             patch("pipeline.scheduler.cluster_articles", side_effect=_mock_cluster),
             patch("pipeline.scheduler._record_run", new_callable=AsyncMock),
-            patch("db.queries.raw_articles.count_unclustered_articles", new_callable=AsyncMock, return_value=0),
+            patch("scripts.db.queries.raw_articles.count_unclustered_articles", new_callable=AsyncMock, return_value=0),
             patch("pipeline.scheduler._get_cluster_telemetry", new_callable=AsyncMock, return_value={
                 "cross_source_clusters": 0, "same_source_clusters": 0, "largest_cluster_size": 0,
             }),
@@ -438,7 +438,7 @@ class TestDedupTelemetry:
             patch("pipeline.scheduler._fetch_all_tickers", new_callable=AsyncMock),
             patch("pipeline.scheduler.cluster_articles", side_effect=_mock_cluster),
             patch("pipeline.scheduler._record_run", new_callable=AsyncMock),
-            patch("db.queries.raw_articles.count_unclustered_articles", new_callable=AsyncMock, return_value=5),
+            patch("scripts.db.queries.raw_articles.count_unclustered_articles", new_callable=AsyncMock, return_value=5),
             patch("pipeline.scheduler._get_cluster_telemetry", new_callable=AsyncMock, return_value={
                 "cross_source_clusters": 0,
                 "same_source_clusters": 0,

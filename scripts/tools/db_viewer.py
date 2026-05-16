@@ -31,7 +31,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 # Allow running from the project root or from tools/
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import asyncpg
 import redis.asyncio as aioredis

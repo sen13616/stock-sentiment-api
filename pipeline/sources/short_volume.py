@@ -37,8 +37,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
-from db.queries.raw_signals import insert_signals
-from db.queries.universe import get_active_tickers
+from scripts.db.queries.raw_signals import insert_signals
+from scripts.db.queries.universe import get_active_tickers
 
 _log = logging.getLogger(__name__)
 

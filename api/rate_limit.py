@@ -19,7 +19,7 @@ import hashlib
 
 from fastapi import HTTPException
 
-from db.redis import get_redis
+from scripts.db.redis import get_redis
 
 _LIMITS: dict[str, int] = {
     "free": 10,

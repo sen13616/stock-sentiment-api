@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends
 
 from api.auth import authenticate
 from api.response.schemas import TickerItem, TickersResponse
-from db.queries.universe import get_all_tickers
+from scripts.db.queries.universe import get_all_tickers
 
 router = APIRouter()
 

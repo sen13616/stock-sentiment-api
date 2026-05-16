@@ -9,8 +9,8 @@ Run with:
 """
 import pytest
 
-from db.connection import close_pool, get_pool, init_pool
-from db.redis import close_redis, get_redis, init_redis
+from scripts.db.connection import close_pool, get_pool, init_pool
+from scripts.db.redis import close_redis, get_redis, init_redis
 
 
 @pytest.mark.integration

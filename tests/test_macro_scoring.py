@@ -113,7 +113,7 @@ class TestScoreMacroSignalsPerTicker:
     async def test_vix_only_when_sector_is_none(self):
         """A null-sector ticker can still score VIX but not the ETF component."""
         # Insufficient history → parametric fallback for VIX
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
             scored = await score_macro_signals(
                 ticker="NEWLY_ADDED", sector=None,
                 raw=[_row("vix", 22.0), _row("sector_etf_return_20d", 0.05)],
@@ -138,7 +138,7 @@ class TestScoreMacroSignalsPerTicker:
             history_calls.append((ticker, signal_type, limit))
             return []  # empty → parametric path
 
-        with patch("db.queries.raw_signals.get_signal_history", new=_fake_history):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=_fake_history):
             await score_macro_signals(
                 ticker="AAPL", sector="Information Technology",
                 raw=[_row("sector_etf_return_20d", 0.10)],
@@ -153,7 +153,7 @@ class TestScoreMacroSignalsPerTicker:
     @pytest.mark.asyncio
     async def test_scored_rows_carry_user_ticker(self):
         """Output rows must be tagged with the ticker being scored, not '_MACRO_' or the ETF symbol."""
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
             scored = await score_macro_signals(
                 ticker="XOM", sector="Energy",
                 raw=[_row("vix", 22.0), _row("sector_etf_return_20d", 0.05)],
@@ -165,7 +165,7 @@ class TestScoreMacroSignalsPerTicker:
     @pytest.mark.asyncio
     async def test_unknown_sector_skips_etf_history_lookup(self):
         """A sector string not in SECTOR_ETFS doesn't blow up; ETF row still parametric-scores."""
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
             scored = await score_macro_signals(
                 ticker="TEST", sector="Made-Up Sector",
                 raw=[_row("sector_etf_return_20d", 0.10)],
@@ -185,7 +185,7 @@ class TestPerTickerDistinctness:
     async def test_two_sectors_diverge_when_etf_returns_diverge(self):
         """AAPL (XLK +10%) and XOM (XLE −10%) must produce materially different macro scores."""
         # Empty history → parametric path for both ETFs
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
             scored_aapl = await score_macro_signals(
                 ticker="AAPL", sector="Information Technology",
                 raw=[_row("vix", 22.0), _row("sector_etf_return_20d", +0.10)],
@@ -286,7 +286,7 @@ class TestFredScoringIntegration:
     @pytest.mark.asyncio
     async def test_fred_signals_recognised_by_score_macro_signals(self):
         """FRED rows enter the macro scoring path and produce scored output."""
-        with patch("db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=AsyncMock(return_value=[])):
             scored = await score_macro_signals(
                 ticker="AAPL", sector="Information Technology",
                 raw=[
@@ -312,7 +312,7 @@ class TestFredScoringIntegration:
             history_calls.append((ticker, signal_type, limit))
             return []
 
-        with patch("db.queries.raw_signals.get_signal_history", new=_fake_history):
+        with patch("scripts.db.queries.raw_signals.get_signal_history", new=_fake_history):
             await score_macro_signals(
                 ticker="AAPL", sector="Information Technology",
                 raw=[

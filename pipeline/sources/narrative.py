@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 
 from langdetect import detect, LangDetectException
 
-from db.queries.raw_articles import hash_exists, insert_article
+from scripts.db.queries.raw_articles import hash_exists, insert_article
 from pipeline.rate_limits import (
     AV_SEM, AV_DELAY,
     FINNHUB_SEM, FINNHUB_DELAY,

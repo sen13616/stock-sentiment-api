@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from db.redis import get_redis
+from scripts.db.redis import get_redis
 
 _TTL_SECONDS = 86_400  # 24 hours
 

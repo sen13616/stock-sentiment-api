@@ -43,9 +43,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from db.connection import get_pool
-from db.queries import price_snapshots as ps_queries
-from db.queries import sentiment_history as sh_queries
+from scripts.db.connection import get_pool
+from scripts.db.queries import price_snapshots as ps_queries
+from scripts.db.queries import sentiment_history as sh_queries
 
 
 def _first_not_none(*vals):

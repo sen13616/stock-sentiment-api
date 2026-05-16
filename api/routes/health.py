@@ -19,7 +19,7 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from db.queries.api_keys import get_key_tier
+from scripts.db.queries.api_keys import get_key_tier
 
 _log = logging.getLogger(__name__)
 

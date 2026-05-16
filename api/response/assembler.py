@@ -20,8 +20,8 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from db.queries.sentiment_history import get_latest
-from db.redis import get_redis
+from scripts.db.queries.sentiment_history import get_latest
+from scripts.db.redis import get_redis
 from pipeline.confidence.staleness import is_market_hours
 
 from .labels import score_to_label

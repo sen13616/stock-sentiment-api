@@ -20,7 +20,7 @@ from api.auth import authenticate
 from api.rate_limit import check_rate_limit
 from api.response.assembler import assemble
 from api.response.schemas import ErrorResponse, FreeTierResponse, NoDataResponse, ProTierResponse
-from db.queries.universe import is_supported_ticker
+from scripts.db.queries.universe import is_supported_ticker
 
 router = APIRouter()
 _log   = logging.getLogger(__name__)

@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 import httpx
 from dotenv import load_dotenv
 
-from db.queries.raw_signals import insert_signals
+from scripts.db.queries.raw_signals import insert_signals
 from pipeline.rate_limits import FRED_SEM, FRED_DELAY, guarded_get
 
 _log = logging.getLogger(__name__)

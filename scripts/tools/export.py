@@ -21,7 +21,7 @@ import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # db_exports handles dotenv loading and all DB connections
 from db_exports import (

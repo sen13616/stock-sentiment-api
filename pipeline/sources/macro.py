@@ -32,7 +32,7 @@ import httpx
 import yfinance as yf
 from dotenv import load_dotenv
 
-from db.queries.raw_signals import (
+from scripts.db.queries.raw_signals import (
     get_close_history,
     insert_signals,
 )

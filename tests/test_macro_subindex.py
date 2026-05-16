@@ -275,7 +275,7 @@ class TestOrchestratorDispatch:
         # Both aggregators get spies; verify only the macro one fires
         # on the macro layer call path.
         with (
-            patch("db.queries.raw_signals.get_signals_since",
+            patch("scripts.db.queries.raw_signals.get_signals_since",
                   new=AsyncMock(return_value=[{
                       "signal_type": "vix", "value": 22.0, "source": "yfinance",
                       "timestamp": _ts(),

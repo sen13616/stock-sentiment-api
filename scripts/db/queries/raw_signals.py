@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from db.connection import get_pool
+from scripts.db.connection import get_pool
 
 
 async def get_signals_since(

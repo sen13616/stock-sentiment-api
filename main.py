@@ -15,8 +15,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import health, history, sentiment, status, tickers
-from db.connection import close_pool, init_pool
-from db.redis import close_redis, init_redis
+from scripts.db.connection import close_pool, init_pool
+from scripts.db.redis import close_redis, init_redis
 from pipeline.scheduler import scheduler
 
 _log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()

@@ -11,7 +11,7 @@ import pytest
 
 async def test_batch_groups_by_ticker():
     """Batched query returns dict with correct per-ticker signal lists."""
-    from db.queries.raw_signals import get_signals_since_batch
+    from scripts.db.queries.raw_signals import get_signals_since_batch
 
     now = datetime.now(timezone.utc)
 
@@ -32,7 +32,7 @@ async def test_batch_groups_by_ticker():
     mock_pool = MagicMock()
     mock_pool.acquire.return_value = mock_ctx
 
-    with patch("db.queries.raw_signals.get_pool", new_callable=AsyncMock, return_value=mock_pool):
+    with patch("scripts.db.queries.raw_signals.get_pool", new_callable=AsyncMock, return_value=mock_pool):
         result = await get_signals_since_batch(
             tickers=["XLK", "XLV", "XLF"],
             since=now,
@@ -49,7 +49,7 @@ async def test_batch_groups_by_ticker():
 
 async def test_batch_empty_tickers():
     """Empty tickers list returns empty dict without hitting DB."""
-    from db.queries.raw_signals import get_signals_since_batch
+    from scripts.db.queries.raw_signals import get_signals_since_batch
 
     result = await get_signals_since_batch(
         tickers=[],
@@ -61,7 +61,7 @@ async def test_batch_empty_tickers():
 
 async def test_batch_empty_signal_types():
     """Empty signal_types list returns empty dict without hitting DB."""
-    from db.queries.raw_signals import get_signals_since_batch
+    from scripts.db.queries.raw_signals import get_signals_since_batch
 
     result = await get_signals_since_batch(
         tickers=["XLK"],

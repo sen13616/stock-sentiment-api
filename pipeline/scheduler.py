@@ -45,8 +45,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 from tqdm import tqdm as _tqdm
 from tqdm.asyncio import tqdm as _atqdm
 
-from db.queries.universe import get_active_tickers, get_ticker_sector_map
-from db.redis import get_redis
+from scripts.db.queries.universe import get_active_tickers, get_ticker_sector_map
+from scripts.db.redis import get_redis
 from pipeline.features.normalize import log_scoring_telemetry, reset_scoring_telemetry
 from pipeline.orchestrator import _score_and_write
 from pipeline.rate_limits import job_counters
@@ -73,7 +73,7 @@ async def _get_cluster_telemetry(since_hours: float = 48.0) -> dict:
     Returns dict with keys: cross_source_clusters, same_source_clusters,
     largest_cluster_size.  Called after the clustering phase completes.
     """
-    from db.queries.raw_articles import get_cluster_source_breakdown
+    from scripts.db.queries.raw_articles import get_cluster_source_breakdown
 
     cross_source = 0
     same_source = 0
@@ -385,7 +385,7 @@ async def narrative_job() -> None:
     fetch_elapsed = time.monotonic() - t_start
 
     # ── Phase 2: Semantic clustering (Sprint 6, G-C6) ─────────────────────
-    from db.queries.raw_articles import count_unclustered_articles
+    from scripts.db.queries.raw_articles import count_unclustered_articles
 
     t_cluster_start = time.monotonic()
     total_clusters = 0
@@ -424,7 +424,7 @@ async def narrative_job() -> None:
     )
 
     # ── Phase 3: FinBERT scoring (Sprint A) ───────────────────────────────
-    from db.queries.raw_articles import get_unscored_articles, update_finbert_scores
+    from scripts.db.queries.raw_articles import get_unscored_articles, update_finbert_scores
     from pipeline.nlp.finbert import score_batch as finbert_score_batch
 
     t_finbert_start = time.monotonic()

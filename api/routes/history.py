@@ -17,8 +17,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from api.auth import authenticate
 from api.response.labels import score_to_label
 from api.response.schemas import ErrorResponse, HistoryEntry, HistoryResponse, HistorySubIndices
-from db.queries.sentiment_history import get_history
-from db.queries.universe import is_supported_ticker
+from scripts.db.queries.sentiment_history import get_history
+from scripts.db.queries.universe import is_supported_ticker
 
 router = APIRouter()
 

@@ -41,7 +41,7 @@ import httpx
 import yfinance as yf
 from dotenv import load_dotenv
 
-from db.queries.raw_signals import insert_signals
+from scripts.db.queries.raw_signals import insert_signals
 from pipeline.rate_limits import (
     FINNHUB_SEM, FINNHUB_DELAY,
     guarded_get,

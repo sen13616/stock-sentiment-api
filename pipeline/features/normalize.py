@@ -283,7 +283,7 @@ class RollingZScorer:
         self, ticker: str, signal_type: str, current_value: float
     ) -> float | None:
         """Fetch history from DB and compute z-score."""
-        from db.queries.raw_signals import get_signal_history
+        from scripts.db.queries.raw_signals import get_signal_history
 
         history = await get_signal_history(ticker, signal_type, limit=self.window)
         return self.score_from_history(history, current_value)
@@ -539,7 +539,7 @@ async def score_market_signals(
     raw    : rows from get_signals_since() — keys: signal_type, value, source, timestamp.
     now    : reference time for time decay.
     """
-    from db.queries.raw_signals import get_signal_history
+    from scripts.db.queries.raw_signals import get_signal_history
 
     result: list[dict] = []
 
@@ -703,7 +703,7 @@ async def score_influencer_signals(
     current_price : Latest close price, used to score analyst_target_price.
                     If None, analyst_target_price signals are skipped.
     """
-    from db.queries.raw_signals import get_signal_history
+    from scripts.db.queries.raw_signals import get_signal_history
 
     result: list[dict] = []
 
@@ -863,7 +863,7 @@ async def score_macro_signals(
              corresponding to the ticker's sector
     now    : scoring tick wall-clock time
     """
-    from db.queries.raw_signals import get_signal_history
+    from scripts.db.queries.raw_signals import get_signal_history
     from pipeline.sources.macro import SECTOR_ETFS
 
     result: list[dict] = []

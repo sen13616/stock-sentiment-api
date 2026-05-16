@@ -36,7 +36,7 @@ import logging
 import uuid
 from datetime import datetime
 
-from db.queries.raw_articles import get_unclustered_articles, set_cluster_ids
+from scripts.db.queries.raw_articles import get_unclustered_articles, set_cluster_ids
 
 _log = logging.getLogger(__name__)
 

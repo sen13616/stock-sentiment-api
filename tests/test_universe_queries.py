@@ -39,8 +39,8 @@ async def test_get_ticker_sector_returns_seeded_value():
     conn.fetchval = AsyncMock(return_value="Information Technology")
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_ticker_sector
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_ticker_sector
         sector = await get_ticker_sector("AAPL")
 
     assert sector == "Information Technology"
@@ -57,8 +57,8 @@ async def test_get_ticker_sector_returns_none_for_unseeded():
     conn.fetchval = AsyncMock(return_value=None)
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_ticker_sector
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_ticker_sector
         sector = await get_ticker_sector("XYZ")
 
     assert sector is None
@@ -71,8 +71,8 @@ async def test_get_ticker_sector_returns_none_for_missing_ticker():
     conn.fetchval = AsyncMock(return_value=None)
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_ticker_sector
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_ticker_sector
         sector = await get_ticker_sector("NOT_A_TICKER")
 
     assert sector is None
@@ -85,8 +85,8 @@ async def test_get_ticker_sector_uppercases_input():
     conn.fetchval = AsyncMock(return_value="Information Technology")
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_ticker_sector
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_ticker_sector
         await get_ticker_sector("aapl")
 
     args = conn.fetchval.await_args.args
@@ -108,8 +108,8 @@ async def test_get_ticker_sector_map_returns_dict():
     conn.fetch = AsyncMock(return_value=rows)
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_ticker_sector_map
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_ticker_sector_map
         result = await get_ticker_sector_map()
 
     assert result == {
@@ -126,8 +126,8 @@ async def test_get_ticker_sector_map_empty_when_no_rows():
     conn.fetch = AsyncMock(return_value=[])
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_ticker_sector_map
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_ticker_sector_map
         result = await get_ticker_sector_map()
 
     assert result == {}
@@ -140,8 +140,8 @@ async def test_get_ticker_sector_map_filters_nulls_at_sql_level():
     conn.fetch = AsyncMock(return_value=[])
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_ticker_sector_map
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_ticker_sector_map
         await get_ticker_sector_map()
 
     sql = conn.fetch.await_args.args[0]
@@ -162,8 +162,8 @@ async def test_get_all_tickers_includes_sector_field():
     conn.fetch = AsyncMock(return_value=rows)
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_all_tickers
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_all_tickers
         items = await get_all_tickers()
 
     assert len(items) == 2
@@ -185,8 +185,8 @@ async def test_get_all_tickers_sector_can_be_null():
     conn.fetch = AsyncMock(return_value=rows)
     pool = _mock_pool_with(conn)
 
-    with patch("db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
-        from db.queries.universe import get_all_tickers
+    with patch("scripts.db.queries.universe.get_pool", new=AsyncMock(return_value=pool)):
+        from scripts.db.queries.universe import get_all_tickers
         items = await get_all_tickers()
 
     assert items[0]["sector"] is None
@@ -198,7 +198,7 @@ async def test_get_all_tickers_sector_can_be_null():
 
 def test_sector_map_only_uses_canonical_gics_strings():
     """Every value in TICKER_SECTORS must be a key in SECTOR_ETFS."""
-    from tools.sector_map import TICKER_SECTORS
+    from scripts.tools.sector_map import TICKER_SECTORS
     from pipeline.sources.macro import SECTOR_ETFS
     valid = set(SECTOR_ETFS.keys())
     invalid = {t: s for t, s in TICKER_SECTORS.items() if s not in valid}
@@ -207,8 +207,8 @@ def test_sector_map_only_uses_canonical_gics_strings():
 
 def test_sector_map_covers_full_universe():
     """All 502 active tickers from tools/company_names.py must have a sector."""
-    from tools.sector_map import TICKER_SECTORS
-    from tools.company_names import COMPANY_NAMES
+    from scripts.tools.sector_map import TICKER_SECTORS
+    from scripts.tools.company_names import COMPANY_NAMES
     missing = set(COMPANY_NAMES) - set(TICKER_SECTORS)
     # P4.1 sprint gate: ≥497 of 502 (plan tolerance for renamed/stale tickers).
     assert len(missing) <= 5, f"sector_map missing {len(missing)} tickers: {sorted(missing)[:10]}"
