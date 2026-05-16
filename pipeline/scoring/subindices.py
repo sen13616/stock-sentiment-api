@@ -33,7 +33,10 @@ are zero.  The orchestration layer redistributes composite weight accordingly.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -226,5 +229,90 @@ def compute_market_sub_index(signals: list[dict]) -> SubIndexResult | None:
     return SubIndexResult(
         value=round(value, 4),
         n_signals=len(valid),
+        sources=sources,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Macro sub-index — paper-direct weighted average, no shrinkage (Sprint P4.4)
+# ---------------------------------------------------------------------------
+
+#: Paper §Macroeconomic Signals weight table (transcribed directly from the
+#: Research Paper v6). Sum = 5.25; the aggregator normalises by the sum of
+#: present weights so missing signals are absorbed without biasing toward 50.
+_MACRO_SIGNAL_WEIGHTS: dict[str, float] = {
+    "vix":                   1.0,
+    "sector_etf_return_20d": 1.5,
+    "treasury_yield_10y":    1.0,
+    "treasury_yield_2y":     0.75,
+    "ted_spread":            1.0,
+}
+
+
+def compute_macro_sub_index(signals: list[dict]) -> SubIndexResult | None:
+    """
+    Macro layer aggregator (paper §Macroeconomic Signals).
+
+    Differences from the generic ``compute_sub_index``:
+      • Per-signal-type weights from `_MACRO_SIGNAL_WEIGHTS` (paper table)
+      • **No `min(1, n/d)` shrinkage** — paper: "macro signals are market-wide
+        state variables that are available at every scoring tick without
+        exception, and the epistemic-caution logic that motivates shrinkage
+        in event-driven channels does not apply here."
+      • Missing components: weight redistributed proportionally over present
+        ones (denominator = sum of present-component weights). Mathematically
+        equivalent to imputing missing signals at the weighted-average of
+        the present ones — sane default that preserves direction.
+
+    Sprint P4.4 replaces the P4.2-era ``compute_sub_index(sigs,
+    shrinkage_denominator=2)`` call site in ``_score_macro``. The
+    ``shrinkage_denominator`` parameter on ``compute_sub_index`` is retained
+    in the public API for narrative/influencer/event-driven layers; only the
+    macro path stops using it.
+
+    Returns
+    -------
+    SubIndexResult with ``value`` in [0, 100] and ``n_signals`` = number of
+    present components, or ``None`` if no recognised macro signals are
+    present (caller falls back to Redis cache via ``_fallback_subindex``).
+    """
+    # Group valid signals by signal_type; if a signal_type appears more than
+    # once, prefer the row whose underlying timestamp is most recent (mirrors
+    # the convention in compute_market_sub_index).
+    grouped: dict[str, dict] = {}
+    for sig in signals:
+        sig_type = sig.get("signal_type")
+        if sig_type not in _MACRO_SIGNAL_WEIGHTS:
+            continue
+        if (sig.get("weight") or 0) <= 0:
+            continue
+        existing = grouped.get(sig_type)
+        if existing is None:
+            grouped[sig_type] = sig
+            continue
+        # Pick the newer of the two; defaults to keeping `existing` on a tie
+        # since the input ordering already encodes recency (DESC from DB).
+        sig_ts = sig.get("timestamp")
+        existing_ts = existing.get("timestamp")
+        if sig_ts is not None and existing_ts is not None and sig_ts > existing_ts:
+            grouped[sig_type] = sig
+
+    if not grouped:
+        return None
+
+    present_w = sum(_MACRO_SIGNAL_WEIGHTS[t] for t in grouped)
+    effective = {t: _MACRO_SIGNAL_WEIGHTS[t] / present_w for t in grouped}
+
+    value = sum(effective[t] * grouped[t]["score"] for t in grouped)
+
+    _log.debug(
+        "compute_macro_sub_index: components=%s effective_weights=%s value=%.2f",
+        sorted(grouped), {k: round(v, 3) for k, v in effective.items()}, value,
+    )
+
+    sources = sorted({s.get("source", "unknown") for s in grouped.values()})
+    return SubIndexResult(
+        value=round(value, 4),
+        n_signals=len(grouped),
         sources=sources,
     )

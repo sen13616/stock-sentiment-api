@@ -59,7 +59,12 @@ from pipeline.scoring.composite import compute_composite
 from pipeline.scoring.ema import compute_ema
 from pipeline.scoring.divergence import compute_divergence
 from pipeline.scoring.drivers import extract_drivers
-from pipeline.scoring.subindices import SubIndexResult, compute_market_sub_index, compute_sub_index
+from pipeline.scoring.subindices import (
+    SubIndexResult,
+    compute_macro_sub_index,
+    compute_market_sub_index,
+    compute_sub_index,
+)
 from pipeline.sources.influencer import fetch_influencer_signals
 from pipeline.sources.macro import fetch_macro_signals
 from pipeline.sources.market import fetch_market_signals
@@ -285,13 +290,14 @@ async def _score_macro(
     last_state: dict | None,
 ) -> tuple[SubIndexResult | None, list[dict], datetime | None]:
     """
-    Sprint P4.2: per-ticker macro scoring. VIX is the shared global signal;
-    the sector ETF component is routed via the ticker's GICS sector.
+    Per-ticker macro scoring.
 
-    Tickers with ``sector IS NULL`` lose the ETF component and fall through
-    to a VIX-only macro (single-signal). The Decision 7 Option C shrinkage
-    override (``shrinkage_denominator=2``) prevents the resulting score
-    from being aggressively pulled toward 50 in that case.
+    • VIX + 3 FRED signals (P4.3) are shared global signals under `_MACRO_`.
+    • Sector ETF return is routed per-ticker via the ticker's GICS sector (P4.2).
+    • Aggregation uses the dedicated `compute_macro_sub_index` with the paper's
+      per-signal-type weight table and NO volume shrinkage (P4.4, M9 + M10).
+      The P4.2-era `compute_sub_index(..., shrinkage_denominator=2)` stopgap
+      has been retired — `compute_macro_sub_index` supersedes it.
     """
     from pipeline.sources.macro import SECTOR_ETFS
 
@@ -321,10 +327,7 @@ async def _score_macro(
     all_raw = global_rows + etf_rows
     if all_raw:
         sigs  = await score_macro_signals(ticker, sector, all_raw, now)
-        # Sprint P4.2 Decision 7 (Option C): macro uses min(1, n/2) shrinkage
-        # so 2 present signals already produce no shrinkage. P4.4 replaces
-        # this with the dedicated compute_macro_sub_index aggregator.
-        si    = compute_sub_index(sigs, shrinkage_denominator=2)
+        si    = compute_macro_sub_index(sigs)
         as_of = _latest_ts(all_raw)
         if si is not None:
             return si, sigs, as_of

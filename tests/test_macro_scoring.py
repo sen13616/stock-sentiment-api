@@ -1,14 +1,15 @@
 """
-tests/test_macro_scoring.py — Sprint P4.2
+tests/test_macro_scoring.py — Sprints P4.2 / P4.3 / P4.4
 
 Per-ticker macro sub-index tests:
-  • `_score_macro(ticker, sector, …)` routes via the ticker's GICS sector
-  • Null-sector tickers drop the ETF component and fall through to VIX-only
+  • `_score_macro(ticker, sector, …)` routes via the ticker's GICS sector (P4.2)
+  • Null-sector tickers drop the ETF component and fall through to global-only
   • `score_macro_signals` z-scores ETF history against the SECTOR_ETFS map
-  • `compute_sub_index(..., shrinkage_denominator=2)` removes shrinkage for
-    macro (Decision 7 Option C stopgap — P4.4 replaces this aggregator)
+  • `compute_sub_index`'s `shrinkage_denominator` parameter still works for
+    non-macro layers (kept in public API; the macro path itself now uses
+    `compute_macro_sub_index` per P4.4 — see test_macro_subindex.py).
   • Two tickers in different sectors with divergent ETF returns produce
-    materially different macro sub-indices
+    materially different macro sub-indices (full pipeline regression).
 """
 from __future__ import annotations
 
@@ -19,7 +20,11 @@ import math
 import pytest
 
 from pipeline.features.normalize import score_macro_signals, _ZSCORE_CONFIG
-from pipeline.scoring.subindices import compute_sub_index, SubIndexResult
+from pipeline.scoring.subindices import (
+    compute_macro_sub_index,
+    compute_sub_index,
+    SubIndexResult,
+)
 
 
 def _ts() -> datetime:
@@ -45,49 +50,52 @@ class TestSectorEtfZScoreConfig:
 
 
 # ===========================================================================
-# 2. compute_sub_index shrinkage_denominator parameter (Decision 7 Option C)
+# 2. compute_sub_index shrinkage_denominator parameter
+#    P4.4 retired this idiom on the macro path (now uses compute_macro_sub_index)
+#    but the parameter remains in the API for any future caller. These tests
+#    verify the parameter still works as documented.
 # ===========================================================================
 
-class TestMacroShrinkageStopgap:
+class TestShrinkageDenominatorParameter:
 
     def _signal(self, score, weight=1.0, source="yfinance"):
         return {"score": score, "weight": weight, "source": source}
 
-    def test_default_shrinkage_unchanged_for_two_signals(self):
-        """Default denominator (5) still shrinks with 2 signals: min(1, 2/5) = 0.4."""
+    def test_default_shrinkage_denominator_five(self):
+        """Default denominator (5) shrinks with 2 signals: min(1, 2/5) = 0.4."""
         sigs = [self._signal(80), self._signal(80)]
         result = compute_sub_index(sigs)
         # raw = 80, shrinkage = 0.4 → 50 + 0.4 × 30 = 62
         assert result is not None
         assert abs(result.value - 62.0) < 0.01
 
-    def test_macro_override_no_shrinkage_with_two_signals(self):
+    def test_denominator_two_no_shrinkage_at_n_eq_2(self):
         """shrinkage_denominator=2 yields min(1, 2/2) = 1.0 → raw value preserved."""
         sigs = [self._signal(80), self._signal(80)]
         result = compute_sub_index(sigs, shrinkage_denominator=2)
         assert result is not None
         assert abs(result.value - 80.0) < 0.01
 
-    def test_macro_override_still_shrinks_at_one_signal(self):
-        """With just VIX, shrinkage = min(1, 1/2) = 0.5 — half-pull toward 50."""
+    def test_denominator_two_still_shrinks_at_n_eq_1(self):
+        """With one signal, shrinkage = min(1, 1/2) = 0.5 — half-pull toward 50."""
         sigs = [self._signal(80)]
         result = compute_sub_index(sigs, shrinkage_denominator=2)
         # raw=80, shrinkage=0.5 → 50 + 0.5 × 30 = 65
         assert result is not None
         assert abs(result.value - 65.0) < 0.01
 
-    def test_macro_override_capped_at_one_for_many_signals(self):
+    def test_shrinkage_capped_at_one_for_many_signals(self):
         """shrinkage = min(1, n/d) saturates at 1.0 even for large n."""
         sigs = [self._signal(80) for _ in range(10)]
         default = compute_sub_index(sigs)
-        macro   = compute_sub_index(sigs, shrinkage_denominator=2)
+        denom2  = compute_sub_index(sigs, shrinkage_denominator=2)
         # Both fully saturate shrinkage → identical results
-        assert default is not None and macro is not None
-        assert abs(default.value - macro.value) < 0.01
-        assert abs(macro.value - 80.0) < 0.01
+        assert default is not None and denom2 is not None
+        assert abs(default.value - denom2.value) < 0.01
+        assert abs(denom2.value - 80.0) < 0.01
 
-    def test_narrative_unchanged_by_macro_param(self):
-        """compute_sub_index default behavior preserved when called without the override."""
+    def test_default_behavior_preserved_when_param_omitted(self):
+        """compute_sub_index default behavior unchanged (narrative/influencer callers)."""
         sigs = [self._signal(70), self._signal(70), self._signal(70)]
         result = compute_sub_index(sigs)  # uses default 5
         # raw=70, shrinkage=3/5=0.6 → 50 + 0.6 × 20 = 62
@@ -199,9 +207,9 @@ class TestPerTickerDistinctness:
         assert aapl_etf["score"] > 60.0   # +10% return = bullish under tanh
         assert xom_etf["score"]  < 40.0   # −10% return = bearish
 
-        # Aggregated via the macro shrinkage stopgap (denominator=2)
-        si_aapl = compute_sub_index(scored_aapl, shrinkage_denominator=2)
-        si_xom  = compute_sub_index(scored_xom,  shrinkage_denominator=2)
+        # Aggregated via the P4.4 dedicated macro aggregator
+        si_aapl = compute_macro_sub_index(scored_aapl)
+        si_xom  = compute_macro_sub_index(scored_xom)
         assert si_aapl is not None and si_xom is not None
         # Materially different — the gap should be ≥ 10 points
         assert (si_aapl.value - si_xom.value) > 10.0
