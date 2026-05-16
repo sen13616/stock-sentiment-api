@@ -8,6 +8,75 @@ This repository accompanies the research paper **"How to Quantify Stock Sentimen
 
 ---
 
+## How to Use
+
+SentientMarkets API is currently invite-only. To request access, reach out directly.
+
+Once provisioned, you'll receive a Bearer token. Include it in the `Authorization` header on every request.
+
+### Authentication
+
+```bash
+curl -H "Authorization: Bearer sk-sm-prod-xxxxxxxxxxxx" \
+  https://sentimentapi-p.up.railway.app/v1/sentiment/AAPL
+```
+
+### Get sentiment for a ticker
+
+```bash
+GET /v1/sentiment/{ticker}
+```
+
+**Response (Free tier):**
+```json
+{
+  "ticker": "AAPL",
+  "score": 72.4,
+  "sub_indices": {
+    "market": 78.2,
+    "narrative": 65.3,
+    "influencer": 71.0,
+    "macro": 80.1
+  },
+  "layers": 4,
+  "missing_layers": [],
+  "timestamp": "2026-05-16T14:30:00Z"
+}
+```
+
+**Additional fields on Pro tier:** `score_raw`, `ema_obs_count`
+
+### Get sentiment history (Pro)
+
+```bash
+GET /v1/sentiment/{ticker}/history?days=30&interval=1d
+```
+
+**Response:**
+```json
+{
+  "ticker": "AAPL",
+  "history": [
+    { "date": "2026-04-16", "score": 68.5 },
+    { "date": "2026-04-17", "score": 70.1 }
+  ]
+}
+```
+
+### List all covered tickers
+
+```bash
+GET /v1/tickers
+```
+
+Returns all 502 S&P 500 tickers with company names and sectors.
+
+### Full API reference
+
+See [`docs/api/README.md`](docs/api/README.md) for complete endpoint documentation.
+
+---
+
 ## Methodology
 
 ### Four channels, weighted composite
