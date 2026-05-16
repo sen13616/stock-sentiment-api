@@ -217,12 +217,12 @@ Two systems run side-by-side, separated by Redis as the read/write boundary.
 
 ```
                         ┌──────────────────────────────────────┐
-   External APIs ──┐    │              SYSTEM A                │
-   (AV, Finnhub,   │──▶ │      Background pipeline             │
-    yfinance,      │    │  ┌────────────────┐                  │
-    Polygon, FRED, │    │  │ Ingestion jobs │ (write raw_*)    │
-    FINRA REGSHO)  │    │  │  (data only)   │                  │
-                   │    │  └──────┬─────────┘                  │
+   External APIs ────▶  │              SYSTEM A                │
+   (AV, Finnhub,        │      Background pipeline             │
+    yfinance,           │  ┌────────────────┐                  │
+    Polygon, FRED,      │  │ Ingestion jobs │ (write raw_*)    │
+    FINRA REGSHO)       │  │  (data only)   │                  │
+                        │  └──────┬─────────┘                  │
                         │         ▼                            │
                         │  ┌────────────────┐                  │
                         │  │ scoring_tick   │ every 30 min     │
