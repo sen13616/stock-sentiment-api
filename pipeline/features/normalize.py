@@ -5,12 +5,64 @@ Converts raw signal values fetched from the database into scored, weighted
 signal dicts that can be passed to pipeline.scoring.subindices.compute_sub_index()
 and pipeline.scoring.drivers.extract_drivers().
 
+Per-signal weight formula (paper §Event-Level Weighting)
+--------------------------------------------------------
+The canonical formula stated by the paper is:
+
+    w_i  =  w_src · w_rel · w_conf · w_author · exp(−λ · Δt_i)
+
+Term-by-term: where it lives in this module, paper anchor, current state.
+
+    w_src     Source-credibility weight. Source-keyed by default via
+              `_SOURCE_WEIGHTS`. Influencer channel keys by SIGNAL CHANNEL
+              instead (insider / analyst-consensus / analyst-target /
+              earnings-revisions) via `_INFLUENCER_SIGNAL_WEIGHT`; the
+              dispatcher is `_get_signal_weight`. Paper §Event-Level Weighting
+              + paper Data-Collection source-hierarchy table.
+
+    w_rel     Relevance weight. Narrative channel only. Set per-article from
+              `raw_articles.relevance_score`. Articles below the inclusion
+              threshold (0.60, Sprint D) are excluded entirely before this
+              function is called. Paper Stage 2.
+
+    w_conf    Model-confidence weight. Narrative channel only. Computed from
+              FinBERT class probabilities as
+                  w_conf = 1 − (−Σ P_i ln P_i) / ln 3
+              by `_compute_w_conf`. Set to 1.00 for all non-textual signals
+              per paper: "Model confidence does not apply to non-textual
+              signals and is set to 1.00 throughout." Paper §Event-Level
+              Weighting (Sprint A).
+
+    w_author  Author-credibility weight. Influencer channel only;
+              `_INFLUENCER_W_AUTHOR = 1.00` uniformly today. Scaffold for the
+              role-based hierarchy (CEO → CFO → Director …) that the paper
+              explicitly defers to Future Additions. Narrative-channel
+              `w_author` is folded into `w_src` per paper §Event-Level
+              Weighting and is not a standalone term in the narrative weight.
+
+    Δt_i      Age of the signal at scoring time = `now − timestamp`.
+
+    λ         ln(2) / half_life. Half-life lookup:
+                - `_LAYER_HALF_LIFE_H` (layer default, paper §Historical
+                  Data),
+                - `_HALF_LIFE_OVERRIDE` (currently empty; reserved for
+                  future (layer, source) overrides),
+                - `_INFLUENCER_SIGNAL_HALF_LIFE_H` (signal-channel override
+                  for the influencer layer; today only insider rows at
+                  168 h, paper §Event-Level Weighting).
+              The dispatcher is `_get_half_life`.
+
+The formula is applied per layer in `_build` (non-narrative path) and in
+`score_narrative_articles` (narrative path). The narrative path is the only
+place where w_rel and w_conf are populated; everywhere else they are
+implicitly 1.0 and drop out of the product.
+
 Output dict schema (per signal)
 --------------------------------
     signal_type : str    — e.g. "rsi_14"
     value       : float  — raw value (preserved for driver descriptions)
     score       : float  — direction-corrected [0, 100], 50 = neutral
-    weight      : float  — combined w_source × w_time  (> 0)
+    weight      : float  — combined w_src · w_rel · w_conf · w_author · exp(−λΔt)
     source      : str    — data source label
     layer       : str    — "market" | "narrative" | "influencer" | "macro"
     ticker      : str    — ticker symbol
@@ -18,12 +70,14 @@ Output dict schema (per signal)
 Scoring conventions
 -------------------
 - All scores are direction-corrected: > 50 = bullish, < 50 = bearish.
-- Weights encode two factors: source trustworthiness and time decay.
-- Time decay uses per-source half-lives: market 1h, news 12h, analyst 3d,
-  filings 7d, macro 14d  (Sprint 4, G-S1).
-- Source weights: official filings / exchange data = 1.0, third-party = 0.7–0.9.
-- Z-score normalization (Sprint 4, G-C1): signals with sufficient history
-  (≥ 30 observations) use adaptive z-score; others fall back to fixed
+- Time decay half-lives: market 1h, news 12h, analyst 3d, insider 7d,
+  macro 14d (Sprint 4, G-S1; paper §Historical Data).
+- Source weights: exchange-grade data (yfinance, Polygon, FINRA) = 0.85–0.90;
+  third-party news aggregators (AV, Finnhub) = 0.65–0.75. See
+  `_SOURCE_WEIGHTS` below.
+- Z-score normalization (Sprint 4, G-C1; paper §Normalization): signals with
+  sufficient history (≥ `fill_threshold · window` observations, default
+  50%) use adaptive z-score via `RollingZScorer`; others fall back to fixed
   parametric scorers.
 """
 from __future__ import annotations
@@ -41,10 +95,12 @@ _log = logging.getLogger(__name__)
 _SOURCE_WEIGHTS: dict[str, float] = {
     "alpha_vantage": 0.75,   # Paper §Event-Level Weighting (Sprint A)
     "polygon":       0.9,
-    "sec_edgar":     1.0,
     "finnhub":       0.65,   # Paper §Event-Level Weighting (Sprint A)
     "computed":      0.85,
     # Removed Stage 1 — "newsapi" excluded from paper's implemented methodology. See docs/SIGNAL_CATALOG.md.
+    # Removed Phase 5 retraction — "sec_edgar" entry dropped 2026-05-16; Sprint C (EDGAR 8-K narrative source)
+    # never merged to main. 8-K filings move to Future Additions; the source label is no longer written by
+    # any active ingester (Form 4 was removed in P3.4; insider data now comes solely from Finnhub).
     "yfinance":      0.9,
     "finra_regsho":  0.9,
 }
@@ -65,12 +121,13 @@ _LAYER_HALF_LIFE_H: dict[str, float] = {
 }
 
 # Overrides for specific (layer, source) combinations.
-# Sprint P3.4 removed the only entry — `("influencer", "sec_edgar"): 168.0` —
-# because the EDGAR Form 4 primary path was deleted and the 168h insider half-life
-# is now applied via `_INFLUENCER_SIGNAL_HALF_LIFE_H["insider_net_shares"]` below
-# (P3.1, I4). Kept as an empty dict so future (layer, source) overrides have a home.
-# Note: this line was missing from P3.4 commit abb6008 (only the test landed) and from
-# P4.1 commit 425eba8; restored during Sprint P4.2 baseline pre-flight (2026-05-15).
+# Currently empty. The historical `("influencer", "sec_edgar"): 168.0` override was
+# removed in Sprint P3.4 when the EDGAR Form 4 primary path was deleted (insider data
+# now comes solely from Finnhub); the 168h insider half-life is applied via
+# `_INFLUENCER_SIGNAL_HALF_LIFE_H["insider_net_shares"]` below (P3.1, I4). Phase 5
+# retraction (2026-05-16) confirmed that `sec_edgar` is no longer a wired source —
+# Sprint C (EDGAR 8-K narrative) was drafted but never merged and has been moved to
+# Future Additions. Kept as an empty dict so future (layer, source) overrides have a home.
 _HALF_LIFE_OVERRIDE: dict[tuple[str, str], float] = {}
 
 # Influencer-layer signal-type overrides (Sprint P3.1, paper §Event-Level Weighting).

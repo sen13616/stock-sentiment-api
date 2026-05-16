@@ -246,15 +246,18 @@ class TestSourceWeights:
 
     def test_av_weight_lower_than_exchange_data(self):
         """AV is a third-party aggregator — weight should be lower than exchange data."""
-        assert _SOURCE_WEIGHTS["alpha_vantage"] < _SOURCE_WEIGHTS["sec_edgar"]
+        assert _SOURCE_WEIGHTS["alpha_vantage"] < _SOURCE_WEIGHTS["polygon"]
 
     def test_finnhub_lower_than_av(self):
         """Per paper: Finnhub < AV in source hierarchy."""
         assert _SOURCE_WEIGHTS["finnhub"] < _SOURCE_WEIGHTS["alpha_vantage"]
 
-    def test_sec_edgar_is_highest(self):
-        """SEC EDGAR at 1.0 — top of source hierarchy."""
-        assert _SOURCE_WEIGHTS["sec_edgar"] == 1.0
+    def test_sec_edgar_absent(self):
+        """Phase 5 retraction (2026-05-16): Sprint C (EDGAR 8-K narrative) never
+        merged to main; the only ingester that wrote source='sec_edgar' rows
+        (Form 4) was removed in P3.4. The label is no longer a valid source —
+        a future re-implementation should land via a fresh weight entry."""
+        assert "sec_edgar" not in _SOURCE_WEIGHTS
 
 
 # ---------------------------------------------------------------------------

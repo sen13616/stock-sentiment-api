@@ -213,10 +213,16 @@ class TestInfluencerSignalChannelWeights:
     """Sprint P3.1 — paper §Event-Level Weighting: w_src keyed by signal channel."""
 
     def test_insider_channel_weight_is_100(self):
-        """I1: insider transactions get w_src = 1.00 regardless of provider."""
+        """I1: insider transactions get w_src = 1.00 regardless of provider.
+
+        Second assertion uses a deliberately unknown source string to confirm
+        the channel-weight table wins even when the source is not in
+        `_SOURCE_WEIGHTS`. (Pre-Phase-5 this was asserted with `"sec_edgar"`;
+        that source was retracted when Sprint C — EDGAR 8-K — was abandoned.)
+        """
         from pipeline.features.normalize import _get_signal_weight
         assert _get_signal_weight("influencer", "finnhub", "insider_net_shares") == 1.00
-        assert _get_signal_weight("influencer", "sec_edgar", "insider_net_shares") == 1.00
+        assert _get_signal_weight("influencer", "unknown_provider", "insider_net_shares") == 1.00
 
     def test_analyst_consensus_weight_is_085(self):
         """I2: analyst consensus channel weight = 0.85."""
@@ -254,9 +260,14 @@ class TestInfluencerInsiderHalfLife:
         """Finnhub-sourced insider rows now get 168h, not 72h layer default."""
         assert _get_half_life("influencer", "finnhub", "insider_net_shares") == 168.0
 
-    def test_insider_sec_edgar_uses_168h(self):
-        """SEC EDGAR insider rows: 168h via the signal-type table (the source-keyed override was removed in P3.4)."""
-        assert _get_half_life("influencer", "sec_edgar", "insider_net_shares") == 168.0
+    def test_insider_unknown_source_still_uses_168h(self):
+        """Signal-type routing applies regardless of provider — insider rows
+        from any source land at 168h via `_INFLUENCER_SIGNAL_HALF_LIFE_H`.
+
+        Pre-Phase-5 this asserted the same property using `"sec_edgar"`; that
+        source label was retracted when Sprint C (EDGAR 8-K) was abandoned.
+        """
+        assert _get_half_life("influencer", "unknown_provider", "insider_net_shares") == 168.0
 
     def test_analyst_buy_pct_still_72h(self):
         """Analyst consensus uses 72h layer default."""

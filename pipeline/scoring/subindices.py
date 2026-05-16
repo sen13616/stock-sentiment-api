@@ -237,15 +237,25 @@ def compute_market_sub_index(signals: list[dict]) -> SubIndexResult | None:
 # Macro sub-index — paper-direct weighted average, no shrinkage (Sprint P4.4)
 # ---------------------------------------------------------------------------
 
-#: Paper §Macroeconomic Signals weight table (transcribed directly from the
-#: Research Paper v6). Sum = 5.25; the aggregator normalises by the sum of
-#: present weights so missing signals are absorbed without biasing toward 50.
+#: Paper §Macroeconomic Signals weight table (Research Paper v6, transcribed
+#: directly from the §Macroeconomic Signals → Aggregation subsection). Sum =
+#: 5.25; the aggregator normalises by the sum of present weights so that
+#: missing signals are absorbed without biasing toward 50. The per-signal
+#: weights are NOT equal because the paper assigns higher influence to the
+#: sector-level signal (`sector_etf_return_20d`, w=1.5) — this is the only
+#: per-ticker macro input and the paper argues it carries the largest fraction
+#: of the macro information per ticker. All other inputs are market-wide.
+#:
+#: `ted_spread` here is the `T10Y2Y` substitute introduced by Sprint P4.3
+#: (pipeline/sources/fred.py). The original 3M-LIBOR–3M-T-bill TED spread was
+#: discontinued in 2022 with LIBOR; the paper text needs to be updated to
+#: reflect the substitution and is queued for the next paper-edit cycle.
 _MACRO_SIGNAL_WEIGHTS: dict[str, float] = {
-    "vix":                   1.0,
-    "sector_etf_return_20d": 1.5,
-    "treasury_yield_10y":    1.0,
-    "treasury_yield_2y":     0.75,
-    "ted_spread":            1.0,
+    "vix":                   1.0,    # Paper §Macroeconomic Signals — risk gauge
+    "sector_etf_return_20d": 1.5,    # Paper §Macroeconomic Signals — sector trend; only per-ticker macro input
+    "treasury_yield_10y":    1.0,    # Paper §Macroeconomic Signals — long-end rates
+    "treasury_yield_2y":     0.75,   # Paper §Macroeconomic Signals — short-end rates (lower weight: high-correlation with 10y)
+    "ted_spread":            1.0,    # Paper §Macroeconomic Signals — yield-curve / credit-stress proxy (T10Y2Y substitute)
 }
 
 

@@ -1,22 +1,37 @@
 """
 pipeline/sources/fred.py  — Layer 06 (Macro)  · Sprint P4.3
 
-FRED (St. Louis Fed) Treasury / yield-curve signals. Three daily macro
-inputs feed the macro sub-index alongside VIX and the per-ticker sector
-ETF return:
+FRED (St. Louis Fed) Treasury / yield-curve signals. Implements the three
+rates-based macro inputs called for in paper §Macroeconomic Signals (paper
+§Data Collection — Macroeconomic Signals row). They feed the macro
+sub-index alongside VIX and the per-ticker sector-ETF return:
 
     treasury_yield_10y  →  FRED series  DGS10   (10-year constant maturity)
     treasury_yield_2y   →  FRED series  DGS2    (2-year constant maturity)
     ted_spread          →  FRED series  T10Y2Y  (10y − 2y yield-curve slope)
 
-The original TED spread (3-month LIBOR − 3-month T-bill) was discontinued
-in 2022 with LIBOR; `T10Y2Y` is the agreed substitute (decision 2026-05-12).
-Paper alignment note flagged in `docs/masterchecklist.md` § Phase 4 paper
-edits — surface during Phase 5 finalization.
+TED-substitute decision (paper alignment)
+-----------------------------------------
+The paper's §Macroeconomic Signals table names a "TED spread (3-month LIBOR
+− 3-month T-bill)" as one of the five macro inputs. That series was
+discontinued in 2022 alongside LIBOR's retirement and is no longer
+published. The agreed substitute is the **10y − 2y Treasury yield-curve
+slope (`T10Y2Y`)** — same role in the paper (credit-stress / yield-curve
+proxy), same sign convention (negative slope = recession signal = bearish
+for equities), available on FRED with daily updates back to 1976.
+
+Decision made 2026-05-12 during Sprint P4.3 planning. The substitution is
+load-bearing: every macro composite the API has emitted since P4.3 deployed
+uses `T10Y2Y`, not LIBOR-TED. The paper text needs to be edited to reflect
+the substitution; this is queued for the next paper-edit cycle and tracked
+in `docs/masterchecklist.md` § Phase 4 paper edits. Until then the deployed
+code is canonical and the paper text describes the *intended* signal that
+this substitute fulfils.
 
 Storage: all three written under `ticker='_MACRO_'`, matching the existing
 VIX convention. Scoring picks them up via the single `_MACRO_TICKER` fetch
-in `_score_macro`.
+in `_score_macro`. Per-signal weights and aggregation are in
+`pipeline/scoring/subindices.py:_MACRO_SIGNAL_WEIGHTS`.
 """
 from __future__ import annotations
 
