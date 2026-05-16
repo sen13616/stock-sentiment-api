@@ -233,3 +233,55 @@ async def get_latest_close(ticker: str) -> float | None:
             ticker,
         )
     return float(val) if val is not None else None
+
+
+OHLCV_SIGNAL_TYPES: list[str] = [
+    "yf_open", "yf_high", "yf_low", "yf_close", "yf_volume",
+    "ohlcv_open", "ohlcv_high", "ohlcv_low", "ohlcv_close",
+    "ohlcv_adjusted_close", "ohlcv_volume",
+]
+
+
+async def purge_signals_before(
+    cutoff: datetime,
+    signal_types: list[str] | None = None,
+    *,
+    exclude: bool = False,
+) -> int:
+    """Delete raw_signals rows with timestamp < cutoff.
+
+    When `signal_types` is provided and `exclude` is False, only rows whose
+    signal_type is in the list are deleted. When `exclude` is True, only rows
+    whose signal_type is NOT in the list are deleted. When `signal_types` is
+    None, all rows older than the cutoff are deleted.
+
+    Returns the number of rows deleted.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if signal_types is None:
+            tag = await conn.execute(
+                "DELETE FROM raw_signals WHERE timestamp < $1",
+                cutoff,
+            )
+        elif exclude:
+            tag = await conn.execute(
+                """
+                DELETE FROM raw_signals
+                WHERE timestamp   < $1
+                  AND signal_type <> ALL($2::text[])
+                """,
+                cutoff,
+                signal_types,
+            )
+        else:
+            tag = await conn.execute(
+                """
+                DELETE FROM raw_signals
+                WHERE timestamp   < $1
+                  AND signal_type = ANY($2::text[])
+                """,
+                cutoff,
+                signal_types,
+            )
+    return int(tag.split()[-1]) if tag else 0

@@ -35,7 +35,7 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import yfinance as yf
@@ -45,6 +45,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 from tqdm import tqdm as _tqdm
 from tqdm.asyncio import tqdm as _atqdm
 
+from scripts.db.queries.raw_articles import purge_articles_before
+from scripts.db.queries.raw_signals import OHLCV_SIGNAL_TYPES, purge_signals_before
 from scripts.db.queries.universe import get_active_tickers, get_ticker_sector_map
 from scripts.db.redis import get_redis
 from pipeline.features.normalize import log_scoring_telemetry, reset_scoring_telemetry
@@ -616,6 +618,58 @@ async def scoring_tick_job() -> None:
         )
 
 
+OHLCV_RETENTION_DAYS = 365
+SIGNAL_RETENTION_DAYS = 90
+ARTICLE_RETENTION_DAYS = 30
+
+
+async def retention_job() -> None:
+    """Daily retention job — runs at 03:30 UTC.
+
+    Three deletes:
+      - raw_signals OHLCV rows older than 365 days
+      - raw_signals non-OHLCV rows older than 90 days
+      - raw_articles older than 30 days
+    """
+    t_start = time.monotonic()
+    now = datetime.now(timezone.utc)
+    ohlcv_cutoff   = now - timedelta(days=OHLCV_RETENTION_DAYS)
+    signal_cutoff  = now - timedelta(days=SIGNAL_RETENTION_DAYS)
+    article_cutoff = now - timedelta(days=ARTICLE_RETENTION_DAYS)
+
+    _log.info("retention_job: starting")
+
+    n_ohlcv = n_signals = n_articles = 0
+    try:
+        n_ohlcv = await purge_signals_before(ohlcv_cutoff, OHLCV_SIGNAL_TYPES)
+    except Exception as exc:
+        _log.warning("retention_job: OHLCV purge failed: %s", exc, exc_info=True)
+
+    try:
+        n_signals = await purge_signals_before(
+            signal_cutoff, OHLCV_SIGNAL_TYPES, exclude=True,
+        )
+    except Exception as exc:
+        _log.warning("retention_job: non-OHLCV purge failed: %s", exc, exc_info=True)
+
+    try:
+        n_articles = await purge_articles_before(article_cutoff)
+    except Exception as exc:
+        _log.warning("retention_job: articles purge failed: %s", exc, exc_info=True)
+
+    await _record_run("retention")
+
+    elapsed = time.monotonic() - t_start
+    _log.info(
+        "retention_job complete: ohlcv=%d (>%dd), other_signals=%d (>%dd), "
+        "articles=%d (>%dd) in %.1fs",
+        n_ohlcv, OHLCV_RETENTION_DAYS,
+        n_signals, SIGNAL_RETENTION_DAYS,
+        n_articles, ARTICLE_RETENTION_DAYS,
+        elapsed,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Scheduler instance
 # ---------------------------------------------------------------------------
@@ -700,4 +754,14 @@ scheduler.add_job(
     max_instances=1,
     coalesce=True,
     misfire_grace_time=120,
+)
+
+scheduler.add_job(
+    retention_job,
+    trigger=CronTrigger(hour=3, minute=30),
+    id="retention",
+    name="Data retention (daily 03:30 UTC)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=600,
 )
