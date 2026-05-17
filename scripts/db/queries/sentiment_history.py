@@ -119,7 +119,9 @@ async def get_history(
     ----------
     ticker   : Ticker symbol (case-insensitive).
     days     : Lookback window. Default 30, max 365.
-    interval : 'daily' (one record per day, latest per day) or 'raw' (all rows).
+    interval : 'daily'  (one row per day, latest tick per day),
+               'hourly' (one row per hour, latest tick per hour),
+               'raw'    (every scoring tick).
     """
     days = min(max(1, days), 365)
     pool  = await get_pool()
@@ -141,6 +143,27 @@ async def get_history(
                  WHERE ticker    = $1
                    AND timestamp >= NOW() - ($2 || ' days')::interval
                  ORDER BY timestamp::date DESC, timestamp DESC
+                """,
+                ticker.upper(),
+                str(days),
+            )
+        elif interval == "hourly":
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (DATE_TRUNC('hour', timestamp))
+                       timestamp,
+                       composite_score,
+                       composite_score_smoothed,
+                       ema_obs_count,
+                       market_index,
+                       narrative_index,
+                       influencer_index,
+                       macro_index,
+                       confidence_score
+                  FROM sentiment_history
+                 WHERE ticker    = $1
+                   AND timestamp >= NOW() - ($2 || ' days')::interval
+                 ORDER BY DATE_TRUNC('hour', timestamp) DESC, timestamp DESC
                 """,
                 ticker.upper(),
                 str(days),

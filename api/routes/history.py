@@ -8,7 +8,10 @@ Returns historical sentiment scores for a ticker.  Pro tier only.
 Query parameters
 ----------------
 days     : Lookback window in days.  Default 30, max 365.
-interval : 'daily' (default, one record per day) or 'raw' (every scoring cycle).
+interval : 'daily'  (one record per day),
+           'hourly' (one record per hour),
+           'raw'    (every scoring cycle).
+           When omitted, defaults to 'raw' for days=1 and 'daily' otherwise.
 """
 from __future__ import annotations
 
@@ -34,10 +37,15 @@ router = APIRouter()
 )
 async def get_sentiment_history(
     ticker:   str,
-    days:     int = Query(default=30, ge=1, le=365),
-    interval: str = Query(default="daily", pattern="^(daily|raw)$"),
-    tier:     str = Depends(authenticate),
+    days:     int        = Query(default=30, ge=1, le=365),
+    interval: str | None = Query(default=None, pattern="^(daily|hourly|raw)$"),
+    tier:     str        = Depends(authenticate),
 ) -> HistoryResponse:
+    # When interval is not explicitly provided, default depends on the window:
+    # a 1-day window gets every scoring tick; longer windows collapse to daily.
+    if interval is None:
+        interval = "raw" if days == 1 else "daily"
+
     # Pro tier only
     if tier != "pro":
         raise HTTPException(

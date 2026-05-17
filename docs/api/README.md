@@ -120,7 +120,7 @@ curl -H "Authorization: Bearer sk-sm-your-key" \
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | days | integer | 30 | Lookback window in days (max 365) |
-| interval | string | daily | `daily` (one record per day) or `raw` (every scoring cycle) |
+| interval | string | _see note_ | `daily` (one record per day), `hourly` (one record per hour), or `raw` (every scoring cycle). When omitted, defaults to `raw` for `days=1` and `daily` for all other windows. |
 
 **Response**
 
