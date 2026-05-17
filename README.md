@@ -256,8 +256,19 @@ Two systems run side-by-side, separated by Redis as the read/write boundary.
 | `macro_job` | daily 02:00 UTC | VIX, sector ETF closes |
 | `fred_job` | hourly | FRED `DGS10`, `DGS2`, `T10Y2Y` |
 | `short_volume_job` | weekdays 21:30 UTC | FINRA REGSHO daily short-volume file |
+| `retention_job` | daily 03:30 UTC | deletes old rows — see retention policy below |
 
 Ingestion and scoring are decoupled: ingestion jobs are data-only; only `scoring_tick_job` runs the scoring pipeline. Concurrency is bounded by a `Semaphore(10)` to stay within the asyncpg pool limit.
+
+**Retention policy** (`retention_job`, daily 03:30 UTC):
+
+| Data | Kept for | Reason |
+|---|---|---|
+| `raw_signals` OHLCV (`yf_*`, `ohlcv_*`) | 365 days | longest scoring lookback is 50 trading days; 7× safety margin |
+| `raw_signals` everything else | 90 days | RSI / order-flow / macro / short-volume normalizers use ≤20-day windows |
+| `raw_articles` | 30 days | narrative scoring half-life is 4 h; clustering window is 48 h |
+
+`sentiment_history`, `price_snapshots`, `ticker_universe`, and `api_keys` are not touched. Tune the windows via `OHLCV_RETENTION_DAYS` / `SIGNAL_RETENTION_DAYS` / `ARTICLE_RETENTION_DAYS` in `pipeline/scheduler.py`.
 
 ### Scoring pipeline (per tick, per ticker)
 
