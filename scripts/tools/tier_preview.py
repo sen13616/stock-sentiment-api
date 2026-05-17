@@ -26,7 +26,12 @@ from scripts.db.queries.sentiment_history import get_history
 from scripts.db.queries.universe import is_supported_ticker
 from scripts.db.redis import close_redis, init_redis
 
-_HISTORY_LOOKBACKS = (1, 5, 30)
+_HISTORY_LOOKBACKS = (
+    (1,  "raw"),
+    (1,  "hourly"),
+    (5,  "daily"),
+    (30, "daily"),
+)
 
 
 def _json_default(obj):
@@ -65,10 +70,10 @@ def _format_history_entry(row: dict) -> dict:
     }
 
 
-async def _print_history(ticker: str, days: int) -> None:
-    rows = await get_history(ticker, days=days, interval="daily")
+async def _print_history(ticker: str, days: int, interval: str) -> None:
+    rows = await get_history(ticker, days=days, interval=interval)
     entries = [_format_history_entry(r) for r in rows]
-    print(f"\n========== {ticker} — HISTORY ({days}d, daily, {len(entries)} entries) ==========")
+    print(f"\n========== {ticker} — HISTORY ({days}d, {interval}, {len(entries)} entries) ==========")
     print(json.dumps(entries, indent=2, default=_json_default))
 
 
@@ -90,8 +95,8 @@ async def _preview(ticker: str) -> None:
     print(f"\n========== {ticker} — PRO TIER ==========")
     print(_dump(pro_response))
 
-    for days in _HISTORY_LOOKBACKS:
-        await _print_history(ticker, days)
+    for days, interval in _HISTORY_LOOKBACKS:
+        await _print_history(ticker, days, interval)
 
 
 async def _main() -> None:
