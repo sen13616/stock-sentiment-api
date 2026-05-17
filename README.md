@@ -428,28 +428,6 @@ sentimentapi/
 
 ---
 
-## Phases & audits
-
-The repo has shipped in four phases. Each is anchored to a git tag and audited against the paper.
-
-| Phase | Tag | Anchor commit | What landed |
-|---|---|---|---|
-| 1 | `v1.0-methodology-compliant` | `1b658cc` | Math correctness fixes (log returns, NaN guards), Sprint-3 global scoring tick, Sprint-4 z-score normalization + per-source half-lives, Sprint-5a EMA smoothing, Sprint-6 semantic dedup, Sprint-7 compliance gate |
-| 2 | `v2.0-phase2-narrative` | `dcaac28` | FinBERT integration (ProsusAI/finbert, batch=32, paper formula `S = P(pos) − P(neg)`), `w_conf` entropy weighting, AV→Finnhub article scoring uniform, relevance threshold 0.10 → 0.60, structured JSON logging. **Sprint C (EDGAR 8-K) drafted but not merged — retracted in Phase 5; 8-K moved to Future Additions** |
-| 3 | (untagged today; HEAD before P4 = `abb6008`) | `9b289d3`–`abb6008` | Influencer signal-channel weights (paper §Event-Level Weighting), analyst target-price via yfinance + z-score, earnings-estimate revisions via yfinance, EDGAR Form 4 primary path removed (Finnhub sole insider source). FinBERT OOM fix (batch chunking, `inference_mode`) |
-| 4 | (untagged today; HEAD = `ba580fc`) | `425eba8`–`ba580fc` | `ticker_universe.sector` GICS seeding, per-ticker macro sub-index via sector routing, FRED Treasury / yield-curve signals (DGS10 / DGS2 / T10Y2Y), paper-direct macro aggregator with no shrinkage |
-
-The four post-Phase-1 audits live in `docs/`:
-
-- [`audit_A_market_postphase1.md`](docs/audit_A_market_postphase1.md) — 14 original findings, 11 resolved by Sprints 1–6.
-- [`audit_B_narrative_postphase1.md`](docs/audit_B_narrative_postphase1.md) — 12 original findings; FinBERT items resolved in Sprint A.
-- [`audit_C_composite_postphase1.md`](docs/audit_C_composite_postphase1.md) — composite construction, divergence cap, EMA smoothing — all critical findings RESOLVED.
-- [`audit_D_influencer_macro_postphase1.md`](docs/audit_D_influencer_macro_postphase1.md) — most current; covers through P4.4.
-
-Audits A–C are dated 2026-05-10 (pre-Phase-3/4) and reflect that cutoff; Audit D is current.
-
----
-
 ## Deployment
 
 Production runs on [Railway](https://railway.app/) with nixpacks (`railway.toml`). Postgres and Redis are Railway-managed; the app starts as `python3 -m uvicorn main:app --host 0.0.0.0 --port $PORT`. Health-check path is `/health`.
