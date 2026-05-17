@@ -278,3 +278,14 @@ async def update_finbert_scores(
             """,
             rows,
         )
+
+
+async def purge_articles_before(cutoff: datetime) -> int:
+    """Delete raw_articles rows with published_at < cutoff. Returns rows deleted."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        tag = await conn.execute(
+            "DELETE FROM raw_articles WHERE published_at < $1",
+            cutoff,
+        )
+    return int(tag.split()[-1]) if tag else 0

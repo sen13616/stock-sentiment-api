@@ -256,8 +256,19 @@ Two systems run side-by-side, separated by Redis as the read/write boundary.
 | `macro_job` | daily 02:00 UTC | VIX, sector ETF closes |
 | `fred_job` | hourly | FRED `DGS10`, `DGS2`, `T10Y2Y` |
 | `short_volume_job` | weekdays 21:30 UTC | FINRA REGSHO daily short-volume file |
+| `retention_job` | daily 03:30 UTC | deletes old rows — see retention policy below |
 
 Ingestion and scoring are decoupled: ingestion jobs are data-only; only `scoring_tick_job` runs the scoring pipeline. Concurrency is bounded by a `Semaphore(10)` to stay within the asyncpg pool limit.
+
+**Retention policy** (`retention_job`, daily 03:30 UTC):
+
+| Data | Kept for | Reason |
+|---|---|---|
+| `raw_signals` OHLCV (`yf_*`, `ohlcv_*`) | 365 days | longest scoring lookback is 50 trading days; 7× safety margin |
+| `raw_signals` everything else | 90 days | RSI / order-flow / macro / short-volume normalizers use ≤20-day windows |
+| `raw_articles` | 30 days | narrative scoring half-life is 4 h; clustering window is 48 h |
+
+`sentiment_history`, `price_snapshots`, `ticker_universe`, and `api_keys` are not touched. Tune the windows via `OHLCV_RETENTION_DAYS` / `SIGNAL_RETENTION_DAYS` / `ARTICLE_RETENTION_DAYS` in `pipeline/scheduler.py`.
 
 ### Scoring pipeline (per tick, per ticker)
 
@@ -414,28 +425,6 @@ sentimentapi/
     ├── sprint_plan.md                        (24-sprint umbrella, Phases 1–4)
     └── spikes/apewisdom_2026_05_11.md
 ```
-
----
-
-## Phases & audits
-
-The repo has shipped in four phases. Each is anchored to a git tag and audited against the paper.
-
-| Phase | Tag | Anchor commit | What landed |
-|---|---|---|---|
-| 1 | `v1.0-methodology-compliant` | `1b658cc` | Math correctness fixes (log returns, NaN guards), Sprint-3 global scoring tick, Sprint-4 z-score normalization + per-source half-lives, Sprint-5a EMA smoothing, Sprint-6 semantic dedup, Sprint-7 compliance gate |
-| 2 | `v2.0-phase2-narrative` | `dcaac28` | FinBERT integration (ProsusAI/finbert, batch=32, paper formula `S = P(pos) − P(neg)`), `w_conf` entropy weighting, AV→Finnhub article scoring uniform, relevance threshold 0.10 → 0.60, structured JSON logging. **Sprint C (EDGAR 8-K) drafted but not merged — retracted in Phase 5; 8-K moved to Future Additions** |
-| 3 | (untagged today; HEAD before P4 = `abb6008`) | `9b289d3`–`abb6008` | Influencer signal-channel weights (paper §Event-Level Weighting), analyst target-price via yfinance + z-score, earnings-estimate revisions via yfinance, EDGAR Form 4 primary path removed (Finnhub sole insider source). FinBERT OOM fix (batch chunking, `inference_mode`) |
-| 4 | (untagged today; HEAD = `ba580fc`) | `425eba8`–`ba580fc` | `ticker_universe.sector` GICS seeding, per-ticker macro sub-index via sector routing, FRED Treasury / yield-curve signals (DGS10 / DGS2 / T10Y2Y), paper-direct macro aggregator with no shrinkage |
-
-The four post-Phase-1 audits live in `docs/`:
-
-- [`audit_A_market_postphase1.md`](docs/audit_A_market_postphase1.md) — 14 original findings, 11 resolved by Sprints 1–6.
-- [`audit_B_narrative_postphase1.md`](docs/audit_B_narrative_postphase1.md) — 12 original findings; FinBERT items resolved in Sprint A.
-- [`audit_C_composite_postphase1.md`](docs/audit_C_composite_postphase1.md) — composite construction, divergence cap, EMA smoothing — all critical findings RESOLVED.
-- [`audit_D_influencer_macro_postphase1.md`](docs/audit_D_influencer_macro_postphase1.md) — most current; covers through P4.4.
-
-Audits A–C are dated 2026-05-10 (pre-Phase-3/4) and reflect that cutoff; Audit D is current.
 
 ---
 
