@@ -235,7 +235,7 @@ async def _run_macro(client: httpx.AsyncClient) -> None:
             continue
 
         etf_close, etf_ts = result
-        rows.append((etf, "sector_etf_close", etf_close, "alpha_vantage", "live", etf_ts))
+        rows.append((etf, "ohlcv_close", etf_close, "alpha_vantage", "live", etf_ts))
 
         close_history = await get_close_history(etf, limit=22)
         ret_20d = _compute_etf_return_20d(etf_close, close_history)

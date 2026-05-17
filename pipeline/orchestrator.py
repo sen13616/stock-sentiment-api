@@ -89,7 +89,7 @@ _LAYER_LOOKBACK: dict[str, timedelta] = {
     "market":     timedelta(minutes=90),
     "narrative":  timedelta(hours=6),
     "influencer": timedelta(days=3),
-    "macro":      timedelta(hours=24),
+    "macro":      timedelta(hours=72),
 }
 
 # How far back to look in the DB when fetching raw data for scoring.

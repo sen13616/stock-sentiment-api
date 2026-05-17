@@ -10,7 +10,7 @@ Thresholds (spec §Layer 09)
     news     : 6 hours  (lower bound of the 6–12 hour range)
     analyst  : 3 days   (lower bound of the 3–5 day range)
     insider  : 30 days  (lower bound of the 30–45 day range)
-    macro    : 24 hours
+    macro    : 72 hours (covers weekend gap when macro_intraday is paused)
 
 A source is stale if:
   - its as_of timestamp is None (no data received), OR
@@ -50,7 +50,7 @@ STALENESS_THRESHOLDS: dict[str, timedelta] = {
     "news":    timedelta(hours=6),
     "analyst": timedelta(days=3),
     "insider": timedelta(days=30),
-    "macro":   timedelta(hours=24),
+    "macro":   timedelta(hours=72),
 }
 
 
