@@ -56,14 +56,67 @@ def test_market_job_last_fire_is_2045_utc():
 # ---------------------------------------------------------------------------
 
 
+def _scoring_tick_trigger():
+    """Reconstruct the scoring_tick trigger with explicit UTC (mirrors
+    `_market_trigger`).  Production omits `timezone=` and relies on the
+    Railway server running in UTC."""
+    from apscheduler.triggers.combining import OrTrigger
+    return OrTrigger([
+        CronTrigger(minute="0,30", timezone="UTC"),
+        CronTrigger(day_of_week="mon-fri", hour=14, minute=45, timezone="UTC"),
+        CronTrigger(day_of_week="mon-fri", hour="15-20", minute="15,45", timezone="UTC"),
+    ])
+
+
 def test_scoring_tick_job_registered():
-    """scoring_tick job must be registered with 30-minute interval."""
+    """scoring_tick: 15 min during market hours (mon-fri 14:30-21:00 UTC),
+    30 min off-hours.  Implemented as an OrTrigger of three CronTriggers."""
+    from datetime import timedelta
+
+    from apscheduler.triggers.combining import OrTrigger
+
     from pipeline.scheduler import scheduler
 
     job = scheduler.get_job("scoring_tick")
     assert job is not None, "scoring_tick job not found in scheduler"
-    # IntervalTrigger stores interval as a timedelta
-    assert job.trigger.interval.total_seconds() == 30 * 60
+    assert isinstance(job.trigger, OrTrigger)
+    # Three sub-triggers: base 30-min cadence + two market-hours fills
+    assert len(job.trigger.triggers) == 3
+
+    # Spot-check the fire schedule against a UTC-anchored equivalent trigger.
+    trig = _scoring_tick_trigger()
+
+    # Monday at 14:25 UTC (just before open): next 6 fires should be the
+    # 15-min market-hours cadence starting at 14:30.
+    pre_open = datetime(2026, 5, 18, 14, 25, tzinfo=timezone.utc)
+    fires = []
+    cur = pre_open
+    for _ in range(6):
+        nxt = trig.get_next_fire_time(None, cur)
+        fires.append(nxt)
+        cur = nxt + timedelta(seconds=1)
+    assert fires == [
+        datetime(2026, 5, 18, 14, 30, tzinfo=timezone.utc),
+        datetime(2026, 5, 18, 14, 45, tzinfo=timezone.utc),
+        datetime(2026, 5, 18, 15,  0, tzinfo=timezone.utc),
+        datetime(2026, 5, 18, 15, 15, tzinfo=timezone.utc),
+        datetime(2026, 5, 18, 15, 30, tzinfo=timezone.utc),
+        datetime(2026, 5, 18, 15, 45, tzinfo=timezone.utc),
+    ]
+
+    # Just after close: 30-min cadence resumes (21:30, 22:00, 22:30).
+    post_close = datetime(2026, 5, 18, 21, 5, tzinfo=timezone.utc)
+    fires = []
+    cur = post_close
+    for _ in range(3):
+        nxt = trig.get_next_fire_time(None, cur)
+        fires.append(nxt)
+        cur = nxt + timedelta(seconds=1)
+    assert fires == [
+        datetime(2026, 5, 18, 21, 30, tzinfo=timezone.utc),
+        datetime(2026, 5, 18, 22,  0, tzinfo=timezone.utc),
+        datetime(2026, 5, 18, 22, 30, tzinfo=timezone.utc),
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -6,8 +6,10 @@ APScheduler configuration for the background pipeline (System A).
 Architecture (Sprint 3: global scoring tick)
 ---------------------------------------------
 Ingestion jobs fetch data from external APIs and write to the database.
-They do NOT score.  A dedicated ``scoring_tick_job`` runs every 30 minutes
-and recomputes all four layers for every ticker from current DB state.
+They do NOT score.  A dedicated ``scoring_tick_job`` runs every 15 minutes
+during market hours (weekdays 14:30-21:00 UTC) and every 30 minutes outside
+market hours, recomputing all four layers for every ticker from current DB
+state.
 
 Ingestion jobs:
 
@@ -21,7 +23,7 @@ Ingestion jobs:
 
 Scoring job:
 
-    scoring_tick_job — every 30 minutes, recomputes composite scores for all tickers
+    scoring_tick_job — every 15 min in market hours / 30 min off-hours; recomputes composite scores for all tickers
 
 Usage
 -----
@@ -40,6 +42,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import yfinance as yf
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from tqdm import tqdm as _tqdm
@@ -575,7 +578,8 @@ async def short_volume_job() -> None:
 
 async def scoring_tick_job() -> None:
     """
-    Global scoring tick — every 30 minutes.
+    Global scoring tick — every 15 minutes during market hours
+    (weekdays 14:30-21:00 UTC), every 30 minutes outside market hours.
 
     Recomputes all four layers (market, narrative, influencer, macro) for
     every active ticker from current DB state.  This is the ONLY job that
@@ -748,9 +752,16 @@ scheduler.add_job(
 
 scheduler.add_job(
     scoring_tick_job,
-    trigger=IntervalTrigger(minutes=30),
+    trigger=OrTrigger([
+        # Base cadence: every 30 minutes around the clock (:00 and :30).
+        CronTrigger(minute="0,30"),
+        # Market-hours fills (mon-fri 14:30-21:00 UTC): add :15 and :45 marks
+        # so the effective cadence is 15 min while markets are open.
+        CronTrigger(day_of_week="mon-fri", hour=14, minute=45),
+        CronTrigger(day_of_week="mon-fri", hour="15-20", minute="15,45"),
+    ]),
     id="scoring_tick",
-    name="Global scoring tick (30 min)",
+    name="Global scoring tick (15 min market hours, 30 min off-hours)",
     max_instances=1,
     coalesce=True,
     misfire_grace_time=120,
